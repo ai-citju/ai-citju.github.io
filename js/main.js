@@ -462,9 +462,17 @@ function mountAIGeneratorMain(){
     const root = document.getElementById('aiMainContainer')
     if(!root){ console.error('mountAIGeneratorMain: aiMainContainer not found'); return }
 
+    const displayName = (typeof localStorage !== 'undefined' && localStorage.getItem('auth_username')) || 'User'
+    const profileInitial = (displayName.charAt(0) || 'U').toUpperCase()
+    const esc = (s) => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML }
+
   root.innerHTML = `
     <div class="app-shell">
       <aside class="sidebar panel">
+        <div class="sidebar-profile">
+          <div class="sidebar-avatar" aria-hidden="true">${esc(profileInitial)}</div>
+          <span class="sidebar-username">${esc(displayName)}</span>
+        </div>
         <div class="nav-item active" data-action="generator"><svg viewBox="0 0 24 24"><path d="M12 2L2 7v6c0 5 3.7 9.2 9 11 5.3-1.8 9-6 9-11V7l-10-5z"/></svg><span class="nav-label">Generator</span></div>
         <div class="nav-item" data-action="history"><svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 1 0 9 9h-2a7 7 0 1 1-7-7V3z"/></svg><span class="nav-label">History</span></div>
         <div class="nav-item" data-action="presets"><svg viewBox="0 0 24 24"><path d="M12 7a5 5 0 1 0 5 5 5 5 0 0 0-5-5z"/></svg><span class="nav-label">Presets</span></div>
