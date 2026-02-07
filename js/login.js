@@ -126,8 +126,9 @@ loginBtn.onclick = async function() {
     const data = await res.json();
 
     if (data.token) {
-      // success: store token, nod animation then redirect
+      // success: store token and username (for sidebar profile), nod animation then redirect
       localStorage.setItem('auth_token', data.token);
+      try { localStorage.setItem('auth_username', (username || '').trim() || 'User'); } catch (e) {}
       if (pandaEl) pandaEl.classList.add('success');
       setTimeout(() => { window.location.href = 'index.html'; }, 700);
     } else {
