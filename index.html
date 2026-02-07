@@ -1,77 +1,52 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8" />
+  <title>AI Content Generator untuk FYP & Viral - TikTok, Reels, Shorts | Genco</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Generator konten AI untuk FYP TikTok, caption Reels, YouTube Shorts. Hook 3 detik, viral, affiliate marketing. Buat caption & script cepat." />
+  <meta name="keywords" content="AI content generator, FYP TikTok, viral Reels, caption Instagram, YouTube Shorts, hook 3 detik, affiliate marketing" />
   <link rel="icon" type="image/svg+xml" href="./img/logo.svg" />
   <base href="./">
-  <title>Login - AI Content Generator</title>
-  <link rel="stylesheet" href="./css/style.css" />
-</head>
-<body>
-<div class="bg-animation">
-        <div id="stars"></div>
-        <div id="stars2"></div>
-        <div id="stars3"></div>
-        <div id="stars4"></div>
-    </div>
-  <link href="https://fonts.googleapis.com/css?family=Ubuntu:500" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
-  <link rel="stylesheet" href="./css/login.css">
 
-  <div class="login">
-    <div class="form">
-      
-      <div style="text-align:center; margin-top:12px">
-       <button id="loginBtn" type="button">LOGIN</button>
+  <script>
+    // Redirect ke halaman login jika belum ada token (cek cepat sebelum content dimuat)
+    try {
+      if (!localStorage.getItem('auth_token')) {
+        window.location.replace('login.html');
+      }
+    } catch (e) { /* ignore */ }
+  </script>
 
-<script>
-  document.getElementById("loginBtn").onclick = function () {
-    window.location.href = "/agc/";
-  };
-</script>
-      </div>
-      <div id="loginStatus" class="status"></div>
-    </div>
-  </div>
-
-  <div class="backg">
-    <div class="panda">
-      <div class="earl"></div>
-      <div class="earr"></div>
-      <div class="face">
-        <div class="blshl"></div>
-        <div class="blshr"></div>
-        <div class="eyel"><div class="eyeball1"></div></div>
-        <div class="eyer"><div class="eyeball2"></div></div>
-        <div class="nose"><div class="line"></div></div>
-        <div class="mouth"><div class="m"><div class="m1"></div></div><div class="mm"><div class="m1"></div></div></div>
-      </div>
-    </div>
-  </div>
-  <div class="pawl"><div class="p1"><div class="p2"></div><div class="p3"></div><div class="p4"></div></div></div>
-  <div class="pawr"><div class="p1"><div class="p2"></div><div class="p3"></div><div class="p4"></div></div></div>
-  <div class="handl"></div>
-  <div class="handr"></div>
-
-  <script src="./js/config.js"></script>
-  <script src="./js/login.js"></script>
+  <!-- Theme System (CSS Variables for light/dark mode) -->
+  <link rel="stylesheet" href="./css/theme.css" />
   
-  <!-- Footer -->
-  <footer class="site-footer" style="width: 95%;position: absolute;
-    bottom: 0;text-align:center;padding:14px 12px;color:var(--text-muted);font-size:13px;background:transparent;margin-bottom:18px;">
-    <div style="color: #00c2ff; display: flex;flex-wrap: wrap;justify-content: center;gap: 5px;align-items: center;">
-     <div> © 2026 GenCon — AI Content Generator. Semua hak dilindungi.</div>
-      <div>
-      <a href="./REKOMENDASI-GENERATOR.md" style="color:inherit;opacity:0.9;text-decoration:underline;">Citra</a>
-      &nbsp;|&nbsp;
-      <a href="mailto:support@example.com" style="color:inherit;opacity:0.9;text-decoration:underline;">Marista</a>
-      &nbsp;|&nbsp;
-      <a href="mailto:support@example.com" style="color:inherit;opacity:0.9;text-decoration:underline;">Ainun</a>
-      </div>
-    </div>
-  </footer>
+  <!-- Main Style -->
+  <link rel="stylesheet" href="./css/style.css" />
+
+  <!-- Theme Manager (loads & applies saved theme before page renders) -->
+  <script src="./js/theme.js?v=1"></script>
+</head>
+
+<body>
+
+  <!-- Main AI Generator Container -->
+  <section id="ai-main" style="max-width:1100px;margin:0px auto;padding:0px;border-radius:10px;background:var(--bg-secondary);">
+    <header id="aiMainHeader"></header>
+    <div id="aiMainContainer">Loading AI UI...</div>
+    <div id="ai-settings-placeholder" style="display:none"></div>
+    <div id="ai-history-placeholder" style="display:none"></div>
+  </section>
+
+  <!-- Note: movie grid, controls, modal and gallery removed — page purpose is now AI content generation -->
+
+  <!-- ================= SCRIPTS ================= -->
+  <script src="./js/config.js?v=1"></script>
+  <script src="./js/ai.js?v=23"></script>
+  <script src="./js/presets.js?v=1"></script>
+  <script src="./js/settings.js?v=23"></script>
+  <script src="./js/tmdb.js?v=23"></script>
+  <script src="./js/main.js?v=24"></script>
+
 </body>
 </html>
-
-
