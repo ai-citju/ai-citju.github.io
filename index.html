@@ -23,7 +23,13 @@
     <div class="form">
       
       <div style="text-align:center; margin-top:12px">
-        <button href="/agc/" id="loginBtn" type="button">LOGIN</button>
+       <button id="loginBtn" type="button">LOGIN</button>
+
+<script>
+  document.getElementById("loginBtn").onclick = function () {
+    window.location.href = "/agc/";
+  };
+</script>
       </div>
       <div id="loginStatus" class="status"></div>
     </div>
@@ -67,4 +73,5 @@
   </footer>
 </body>
 </html>
+
 
