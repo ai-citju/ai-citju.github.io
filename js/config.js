@@ -4,10 +4,13 @@
     location.hostname === "127.0.0.1" ||
     location.hostname === "::1";
 
-  // Lokal = backend project (wrangler dev). External = Cloudflare Workers production.
-  const BACKEND_URL = isLocal
-    ? "http://127.0.0.1:8787"
-    : "https://genco.yararara808.workers.dev";
+  const STAGING_BACKEND = "https://genco-backend-staging.sajarotunkasim.workers.dev";
+  const LOCAL_WRANGLER = "http://127.0.0.1:8787";
+  // ?backend=staging → pakai backend deploy meski di localhost (untuk testing sebelum deploy ke GitHub Pages)
+  const useStagingFromLocal = typeof URLSearchParams !== "undefined" && new URLSearchParams(location.search).get("backend") === "staging";
+  const BACKEND_URL = (isLocal && !useStagingFromLocal)
+    ? LOCAL_WRANGLER
+    : STAGING_BACKEND;
   window.API_BASE_URL = BACKEND_URL;
 
   // Backwards-compatible fallbacks: presets & AI pakai backend ini bila user belum set di Settings.
