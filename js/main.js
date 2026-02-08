@@ -472,6 +472,7 @@ function mountAIGeneratorMain(){
   try{
     console.debug('mountAIGeneratorMain: entry')
     const root = document.getElementById('aiMainContainer')
+    if(root) try{ root.style.color = ''; root.innerText = 'Mounting AI UI...'; }catch(e){}
     if(!root){ console.error('mountAIGeneratorMain: aiMainContainer not found'); return }
 
     const displayName = (typeof localStorage !== 'undefined' && localStorage.getItem('auth_username')) || 'User'
@@ -2576,18 +2577,31 @@ function mountAIGeneratorMain(){
 
 // Auto-mount fallback: ensure generator mounts on page load if container exists
 (function(){
+  function reportMountError(err){
+    try{
+      const root = document.getElementById('aiMainContainer')
+      const msg = String(err && err.message ? err.message : err)
+      if(root){ root.style.color = '#c66'; root.innerText = 'Error mounting AI UI: ' + msg }
+      console.error('mountAIGeneratorMain ERROR', err)
+    }catch(e){ console.error('reportMountError failed', e) }
+  }
+
   function tryMount(){
     if(window.__ai_mounted__) return
     try{
-      const hasContainer = !!(document.getElementById('aiMainContainer') || document.getElementById('aiMainHeader'))
+      const root = document.getElementById('aiMainContainer')
+      if(root) try{ root.innerText = 'Attempting auto-mount...'; }catch(e){}
+      const hasContainer = !!(root || document.getElementById('aiMainHeader'))
       const ready = document.readyState === 'complete' || document.readyState === 'interactive'
       if(ready && hasContainer){
-        try{ mountAIGeneratorMain(); window.__ai_mounted__ = true; console.debug('auto-mount: mountAIGeneratorMain invoked') }catch(e){ console.warn('auto-mount failed', e) }
+        try{ mountAIGeneratorMain(); window.__ai_mounted__ = true; console.debug('auto-mount: mountAIGeneratorMain invoked') }catch(e){ console.warn('auto-mount failed', e); reportMountError(e) }
       }
-    }catch(e){}
+    }catch(e){ reportMountError(e) }
   }
+
+  // Try immediate mount (aggressive) then also on DOMContentLoaded and shortly after
+  try{ tryMount() }catch(e){ reportMountError(e) }
   document.addEventListener('DOMContentLoaded', tryMount)
-  // Try again shortly after in case script executed after DOMContentLoaded
   setTimeout(tryMount, 300)
 })();
 
