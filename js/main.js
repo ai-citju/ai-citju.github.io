@@ -486,7 +486,12 @@ function mountAIGeneratorMain(){
           <div class="sidebar-avatar" aria-hidden="true">${esc(profileInitial)}</div>
           <span class="sidebar-username">${esc(displayName)}</span>
         </div>
-        <div class="nav-item active" data-action="generator"><svg viewBox="0 0 24 24"><path d="M12 2L2 7v6c0 5 3.7 9.2 9 11 5.3-1.8 9-6 9-11V7l-10-5z"/></svg><span class="nav-label">Generator</span></div>
+`
+  try{ // insert debug banner to track mount progress
+    let dbg = document.getElementById('aiMountDebug')
+    if(!dbg){ dbg = document.createElement('div'); dbg.id = 'aiMountDebug'; dbg.style.fontSize = '12px'; dbg.style.color = '#6a8'; dbg.style.padding = '6px'; dbg.style.background = 'rgba(0,0,0,0.02)'; dbg.style.borderBottom = '1px solid rgba(255,255,255,0.02)'; root.insertBefore(dbg, root.firstChild) }
+    dbg.textContent = 'mount: innerHTML set'
+  }catch(e){ console.warn('mount debug banner insert failed', e) }        <div class="nav-item active" data-action="generator"><svg viewBox="0 0 24 24"><path d="M12 2L2 7v6c0 5 3.7 9.2 9 11 5.3-1.8 9-6 9-11V7l-10-5z"/></svg><span class="nav-label">Generator</span></div>
         <div class="nav-item" data-action="history"><svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 1 0 9 9h-2a7 7 0 1 1-7-7V3z"/></svg><span class="nav-label">History</span></div>
         <div class="nav-item" data-action="presets"><svg viewBox="0 0 24 24"><path d="M12 7a5 5 0 1 0 5 5 5 5 0 0 0-5-5z"/></svg><span class="nav-label">Presets</span></div>
         <div style="flex:1"></div>
@@ -2568,10 +2573,11 @@ function mountAIGeneratorMain(){
     })
   }catch(e){}
   console.debug('mountAIGeneratorMain: presets populated')
+  try{ const dbg = document.getElementById('aiMountDebug'); if(dbg) dbg.textContent = 'mount: presets populated' }catch(e){ }
 
+  try{ const dbg = document.getElementById('aiMountDebug'); if(dbg) dbg.textContent = 'mount: done' }catch(e){ }
   console.debug('mountAIGeneratorMain: done')
   }catch(err){ console.error('mountAIGeneratorMain: unexpected error', err); throw err }
-
 
 }
 
