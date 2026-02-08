@@ -2603,6 +2603,21 @@ function mountAIGeneratorMain(){
   try{ tryMount() }catch(e){ reportMountError(e) }
   document.addEventListener('DOMContentLoaded', tryMount)
   setTimeout(tryMount, 300)
+
+  // SECONDARY ATTEMPT: in case onload handlers overwrote the diagnostics text earlier
+  setTimeout(()=>{
+    try{
+      const root = document.getElementById('aiMainContainer')
+      if(root){
+        root.innerText += ' · Post-load mount attempt...'
+      }
+      if(!window.__ai_mounted__){
+        try{ mountAIGeneratorMain(); window.__ai_mounted__ = true; console.debug('post-load: mountAIGeneratorMain invoked') }catch(e){ reportMountError(e) }
+      } else {
+        console.debug('post-load: already mounted')
+      }
+    }catch(e){ reportMountError(e) }
+  }, 600)
 })();
 
 // Load models for a provider and populate a given model <select>
