@@ -82,22 +82,22 @@
 			background-color: #ffffff;
     box-shadow: inset 0px 0px 3px 15px #000000;
     height: 40px;
-    width: 45px;
+    width: 60px;
     border-radius: 43px 43px 0 0;
 		}
 		.earl{
 			transform: rotate(-38deg);
-			-webkit-transform: rotate(-38deg);
+			-webkit-transform: rotate(-46deg);
 			position: relative;
-			top:31px;
-			right: 2px;
+			top:33px;
+			right: 18px;
 		}
 		.earr{
 			transform: rotate(38deg);
-			-webkit-transform: rotate(38deg);
+			-webkit-transform: rotate(50deg);
 			position: relative;
-			bottom:8px;
-			left:96px;
+			bottom:6px;
+			left:100px;
 		}
 		.panda{
 			position: relative;
@@ -333,8 +333,18 @@
 
 	/* Hands cover eyes when password focused (body-level .hands-cover) */
 	/* rotate strongly and move upward to cover the eyes */
-	.hands-cover .handl{ transform: translate(36px, -75px) rotate(-150deg); }
-	.hands-cover .handr{ transform: translate(-36px, -75px) rotate(150deg); }
+	.hands-cover .handl{ 
+		transform: translate(36px, -75px) rotate(-141deg);
+    height: 75px;
+    top: calc(32% + 30px);
+    left: calc(50% - 80px);
+}
+	.hands-cover .handr{ 
+		transform: translate(-36px, -75px) rotate(142deg);
+    height: 75px;
+    left: calc(47% + 80px);
+    top: calc(32% + 30px);
+}
 	.hands-cover .panda .eyeball1, .hands-cover .panda .eyeball2{ opacity: 0; transition: opacity .18s ease; }
 
 	/* nod/tilt on success */
@@ -413,6 +423,26 @@
 		.pawr{ left: calc(63% - 10px); top: calc(56% + 40px); }
 		.backg{ top: calc(30% - 86px); }
 		.login{ width: 86%; left: 50%; top: calc(50%); transform: translate(-50%,-50%); }
+		.hands-cover .handl{ 
+		transform: translate(36px, -75px) rotate(-141deg);
+    height: 75px;
+    top: calc(26% + 30px);
+    left: calc(50% - 80px);
+}
+	.hands-cover .handr{ 
+		transform: translate(-36px, -75px) rotate(142deg);
+    height: 75px;
+    left: calc(41% + 80px);
+    top: calc(26% + 30px);
+}
+.face {
+	bottom: 55px;}
+	.earl{
+		top: 18px;
+	}
+	.earr{
+	bottom: 19px;
+	}
 	}
 
   /* BODY ANIMETE AREA */

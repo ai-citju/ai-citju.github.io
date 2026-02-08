@@ -19,6 +19,18 @@
     }catch(e){ return '' }
   },
 
+  // Helper: Get headers with JWT token for authenticated requests
+  getAuthHeaders() {
+    const headers = {}
+    try{
+      const token = localStorage.getItem('auth_token')
+      if(token){
+        headers['Authorization'] = 'Bearer ' + token
+      }
+    }catch(e){}
+    return headers
+  },
+
   init({ backendURL, provider, apiKey }) {
     // idempotent init: skip if nothing changed
     if (
@@ -65,7 +77,10 @@ Sinopsis: ${overview}
     if(!base) throw new Error('AI backendURL not configured')
     const res = await fetch(`${base}/ai/summarize`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { 
+        "Content-Type": "application/json",
+        ...this.getAuthHeaders()
+      },
       body: JSON.stringify({
         provider: this.provider,
         apiKey: this.apiKey,
@@ -83,21 +98,81 @@ Sinopsis: ${overview}
   }
   ,
 
+  // Direct call to Gemini API from frontend
+  async _callGeminiDirect(apiKey, prompt, model) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-2.5-flash'}:generateContent?key=${encodeURIComponent(apiKey)}`
+    
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }]
+      })
+    })
+    
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error?.message || `Gemini API error: ${res.status}`)
+    }
+    
+    const data = await res.json()
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+  },
+
+  // Direct call to OpenAI API from frontend
+  async _callOpenAIDirect(apiKey, prompt, model) {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: model || 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 4000
+      })
+    })
+    
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error?.message || `OpenAI error: ${res.status}`)
+    }
+    
+    const data = await res.json()
+    return data.choices?.[0]?.message?.content || ''
+  },
+
   // Generic prompt runner (used by AI suggestions / social generator)
   async generate({ provider, apiKey, prompt, model } = {}) {
     const useProvider = provider || this.provider
     const useKey = apiKey || this.apiKey
-    if (!this.backendURL) throw new Error("AI backendURL not configured")
     if (!useProvider) throw new Error("AI provider not configured")
     if (!useKey) throw new Error("AI apiKey not configured")
     if (!prompt) throw new Error("Missing prompt")
+
+    // 🆕 TRY DIRECT CALL FIRST FOR GEMINI/OPENAI
+    try {
+      if (useProvider === 'gemini') {
+        return await this._callGeminiDirect(useKey, prompt, model)
+      }
+      if (useProvider === 'openai') {
+        return await this._callOpenAIDirect(useKey, prompt, model)
+      }
+    } catch (directErr) {
+      console.warn(`[AI] Direct ${useProvider} call failed, trying backend...`, directErr)
+      // Fall through to backend
+    }
 
     // prefer a configured backend URL (localStorage / APP_CONFIG) over any pre-set this.backendURL
     const base = this.getBackendURLFromConfig() || this.backendURL
     if(!base) throw new Error('AI backendURL not configured')
     const res = await fetch(`${base}/ai/summarize`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { 
+        "Content-Type": "application/json",
+        ...this.getAuthHeaders()
+      },
       body: JSON.stringify({
         provider: useProvider,
         apiKey: useKey,

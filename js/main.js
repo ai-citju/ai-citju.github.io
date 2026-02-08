@@ -8,15 +8,159 @@ function aiLog(level, tag, data){
     if(level === 'error') console.error('[AI]', tag, out)
     else if(level === 'warn') console.warn('[AI]', tag, out)
     else if(level === 'info') console.info('[AI]', tag, out)
-    else console.debug('[AI]', tag, out)
+    else console.log('[AI]', tag, out)
   }catch(e){ /* ignore logging errors */ }
 }
 function getBackendURL(){
   try{
     const stored = String(localStorage.getItem('backend_url') || '').trim()
     const raw = stored || (window.APP_CONFIG && window.APP_CONFIG.backendURL) || (window.AI && window.AI.backendURL) || ''
-    return String(raw || '').replace(/\/+$/,'')
+    const url = String(raw || '').replace(/\/+$/,'')
+    
+    // Validate URL format
+    if (url) {
+      try {
+        new URL(url)  // Test if valid URL
+        return url
+      } catch (e) {
+        console.warn('[backend] invalid URL:', url)
+        return ''
+      }
+    }
+    return ''
   }catch(e){ return '' }
+}
+
+// Get headers for authenticated requests (includes JWT token)
+function getAuthHeaders(additionalHeaders = {}){
+  const headers = { ...additionalHeaders }
+  try{
+    const token = localStorage.getItem('auth_token')
+    if(token){
+      headers['Authorization'] = 'Bearer ' + token
+    }
+  }catch(e){}
+  return headers
+}
+
+/** Update backend status indicator in real-time (used in header and presets page) */
+function updateBackendStatusIndicator(elementId){
+  const el = document.getElementById(elementId)
+  if (!el) return
+
+  const url = getBackendURL() || ''
+  const token = localStorage.getItem('auth_token')
+  const isLocal = /127\.0\.0\.1|localhost|^https?:\/\/\[?::1\]?/i.test(url)
+  const statusKey = elementId || 'default'
+
+  // default offline state
+  function setOffline(){
+    el.innerHTML = '🔴 OFFLINE'
+    el.style.background = 'rgba(80,0,0,0.25)'
+    el.dataset.status = 'offline'
+    el.style.display = 'flex'
+    el.style.alignItems = 'center'
+    el.style.gap = '6px'
+    el.style.fontFamily = 'monospace'
+    el.style.padding = '6px 8px'
+    el.style.borderRadius = '6px'
+    el.style.fontSize = '12px'
+    el.style.border = '1px solid rgba(106,168,136,0.2)'
+  }
+
+  if (!url) { setOffline(); return }
+
+  const pingUrl = String(url).replace(/\/+$/,'') + '/ai/debug'
+  const controller = new AbortController()
+  const timeoutMs = 8000 // increase timeout to tolerate slow dev worker responses
+  const timer = setTimeout(()=> controller.abort(), timeoutMs)
+
+  // Do NOT send Authorization header for health check to avoid CORS preflight.
+  // /ai/debug is intentionally exposed unauthenticated so frontend can poll it.
+  fetch(pingUrl, { method: 'GET', headers: {}, signal: controller.signal })
+    .then(async res => {
+      clearTimeout(timer)
+      // if not ok, treat as reachable but unauthenticated or error
+      let data = null
+      try{ data = await res.json() }catch(e){ data = null }
+
+      let serverName = 'INVALD'
+      try{ serverName = (new URL(url)).hostname.substring(0,7).toUpperCase() }catch(e){ serverName = 'INVALD' }
+
+      // determine new state
+      let newState = 'responded'
+      if (res.ok && data && data.ok) newState = 'connected'
+      else if (res.ok && data && !data.ok) newState = 'noauth'
+      else if (res.status === 401) newState = 'noauth'
+
+      // reset failure counter on any successful HTTP response
+      try{ window._backendStatusFailCount = window._backendStatusFailCount || {}; window._backendStatusFailCount[statusKey] = 0 }catch(e){}
+
+      // Only update DOM when state changed to avoid flicker
+      if (el.dataset.status !== newState) {
+        if (newState === 'connected'){
+          el.innerHTML = `🟢 ${serverName} ${isLocal ? '(Local)' : '(Cloud)'} — Connected`
+          el.style.background = isLocal ? 'rgba(0,40,20,0.3)' : 'rgba(0,30,60,0.3)'
+        } else if (newState === 'noauth'){
+          el.innerHTML = `🟡 ${serverName} ${isLocal ? '(Local)' : '(Cloud)'} — No Auth`
+          el.style.background = 'rgba(80,60,0,0.3)'
+        } else {
+          el.innerHTML = `🟡 ${serverName} ${isLocal ? '(Local)' : '(Cloud)'} — Responded`
+          el.style.background = 'rgba(80,60,0,0.2)'
+        }
+        el.dataset.status = newState
+        // common styling
+        el.style.display = 'flex'
+        el.style.alignItems = 'center'
+        el.style.gap = '6px'
+        el.style.fontFamily = 'monospace'
+        el.style.padding = '6px 8px'
+        el.style.borderRadius = '6px'
+        el.style.fontSize = '12px'
+        el.style.border = '1px solid rgba(106,168,136,0.2)'
+      }
+    })
+    .then(()=>{})
+    .catch(err => {
+      clearTimeout(timer)
+      // implement simple hysteresis: require 2 consecutive failures before marking OFFLINE
+      try{
+        window._backendStatusFailCount = window._backendStatusFailCount || {}
+        const key = elementId || 'default'
+        window._backendStatusFailCount[key] = (window._backendStatusFailCount[key] || 0) + 1
+        const fails = window._backendStatusFailCount[key]
+        if(fails >= 2){
+          setOffline()
+        }else{
+          // transient failure — show reconnecting state
+          el.innerHTML = '🟡 RECONNECTING'
+          el.style.background = 'rgba(80,60,0,0.2)'
+          el.dataset.status = 'reconnecting'
+          el.style.display = 'flex'
+          el.style.alignItems = 'center'
+          el.style.gap = '6px'
+          el.style.fontFamily = 'monospace'
+          el.style.padding = '6px 8px'
+          el.style.borderRadius = '6px'
+          el.style.fontSize = '12px'
+          el.style.border = '1px solid rgba(106,168,136,0.2)'
+        }
+      }catch(e){ setOffline() }
+    })
+}
+
+// Start periodic polling for both header and presets indicators (once)
+if (!window._backendStatusPollStarted) {
+  window._backendStatusPollStarted = true
+  const pollIntervalMs = 8000
+  const doPoll = ()=>{
+    try{ updateBackendStatusIndicator('Status-server') }catch(e){}
+    try{ updateBackendStatusIndicator('presetsBackendIndicator') }catch(e){}
+  }
+  // initial immediate check
+  setTimeout(doPoll, 250)
+  // periodic
+  window._backendStatusPollHandle = setInterval(doPoll, pollIntervalMs)
 }
 
 /** Jika preset dipakai: tone & keyword dari preset; jika tidak: dari dropdown generator. */
@@ -102,12 +246,13 @@ function buildFullPrompt(opts){
     keywords = '',
     presetInstructions = ''
   } = opts
-  const goals = (preset && Array.isArray(preset.goal) && preset.goal.length) ? preset.goal : ['FYP', 'Viral']
-  const goalsText = goals.join(', ')
+  const goalsArr = (preset && Array.isArray(preset.goal) && preset.goal.length) ? preset.goal : ['FYP', 'Viral']
+  const goalsText = goalsArr.join(', ')
   const goalExplicit = `Konten harus dioptimalkan untuk: ${goalsText}. FYP = hook kuat 3 detik pertama; SEO = keyword alami di title/deskripsi; Viral = shareable & emosional; Penjualan = CTA beli jelas; Follower = CTA follow/subscribe/save.`
-  let ctaGuide = preset && (preset.ctaMain || preset.cta)
-    ? `CTA harus sesuai tujuan: jika Penjualan → ${preset.ctaMain || preset.cta}; jika Follower → ajakan follow/subscribe/save.`
-    : 'CTA harus jelas dan sesuai tujuan konten (follow/subscribe/save atau beli).'
+  let ctaGuide = 'CTA harus jelas dan sesuai tujuan konten (follow/subscribe/save atau beli).'
+  if (preset && (preset.ctaMain || preset.cta)) {
+    ctaGuide = `CTA harus sesuai tujuan: jika Penjualan → ${preset.ctaMain || preset.cta}; jika Follower → ajakan follow/subscribe/save.`
+  }
   if (preset && preset.ctaAffiliate && String(preset.ctaAffiliate).trim()) {
     ctaGuide += ` Sertakan link/CTA affiliate: "${String(preset.ctaAffiliate).trim()}".`
   }
@@ -124,28 +269,8 @@ function buildFullPrompt(opts){
   const trendingBlock = (preset && preset.trendingContext && String(preset.trendingContext).trim())
     ? `\nKonteks trending: ${String(preset.trendingContext).trim()}\n`
     : ''
-  return `${languageInstruction}
-You are a creative social copywriter. Platform: ${platform}. Write in ${lang === 'id' ? 'Indonesian' : 'English'}.
+  return `${languageInstruction}\nYou are a creative social copywriter. Platform: ${platform}. Write in ${lang === 'id' ? 'Indonesian' : 'English'}.\n\nContext:\n- Title: "${title}"\n- Overview: "${overview}"\n- Keyword focus: ${keywordFocus}\n- Tone: ${tone}\n\n${goalExplicit}\n${ctaGuide}\n${hashtagRule}\nMax words description: ${maxWords}.\n\n${platformInstruction}\n${presetInstructions ? ('Preset rules: ' + presetInstructions + '\n\n') : ''}${VIRALITY_RULES}\n${trendingBlock}${exampleBlock}\n\nOutput JSON only with these exact keys: {"title":"...","description":"...","hashtags":["#..","#.."],"hook":"...","narratorScript":"..."}\n- hook: kalimat pembuka menarik untuk 3 detik pertama (FYP).\n- narratorScript: teks untuk voice/narator video (script yang dibacakan).\nReturn only the JSON.`.trim()
 
-Context:
-- Title: "${title}"
-- Overview: "${overview}"
-- Keyword focus: ${keywordFocus}
-- Tone: ${tone}
-
-${goalExplicit}
-${ctaGuide}
-${hashtagRule}
-Max words description: ${maxWords}.
-
-${platformInstruction}
-${presetInstructions ? ('Preset rules: ' + presetInstructions + '\n\n') : ''}${VIRALITY_RULES}
-${trendingBlock}${exampleBlock}
-
-Output JSON only with these exact keys: {"title":"...","description":"...","hashtags":["#..","#.."],"hook":"...","narratorScript":"..."}
-- hook: kalimat pembuka menarik untuk 3 detik pertama (FYP).
-- narratorScript: teks untuk voice/narator video (script yang dibacakan).
-Return only the JSON.`.trim()
 }
 
 // ===== Keyword extraction & suggestions =====
@@ -256,6 +381,92 @@ function showToast(message, type){
 // Core functions
 // -----------------------
 
+// Try to load full API key from backend (returns full key string or null)
+// This is called during model loading when key is not in localStorage
+async function loadApiKeyFromBackend(provider){
+  try{
+    const backendURL = getBackendURL()
+    if(!backendURL) return null
+    aiLog('info','loadApiKeyFromBackend.request',{ provider, backendURL })
+    const controller = new AbortController()
+    const timer = setTimeout(()=>controller.abort(), 5000)
+    const res = await fetch(`${backendURL}/ai/get-key?provider=${encodeURIComponent(provider)}&full=true`, { headers: getAuthHeaders(), signal: controller.signal })
+    clearTimeout(timer)
+    if(!res.ok) return null
+    const j = await res.json().catch(()=>({}))
+    aiLog('info','loadApiKeyFromBackend.response',{ provider, result: j })
+    if(j && j.apiKey) {
+      const apiKey = String(j.apiKey)
+      // 🆕 BARU: Save to localStorage cache
+      localStorage.setItem(`ai_api_key_${provider}`, apiKey)
+      aiLog('info','loadApiKeyFromBackend.cached',{ provider, cached: true })
+      
+      // 🆕 BARU: Populate input field if exists & empty
+      const inputField = document.getElementById('settingsKey_single')
+      if(inputField && !inputField.value){
+        inputField.value = apiKey
+        aiLog('info','loadApiKeyFromBackend.populateInput',{ provider })
+      }
+      
+      return apiKey
+    }
+    return null
+  }catch(e){ aiLog('warn','loadApiKeyFromBackend.error',{ provider, error: String(e) }); return null }
+}
+
+/**
+ * 🆕 GLOBAL: Get API key untuk selected provider
+ * Priority: localStorage cache → settings → input field → backend auto-load
+ */
+async function getKeyForProvider(provider) {
+  if (!provider) return null
+  
+  try {
+    // Priority 1: Check provider-specific localStorage cache (NEW)
+    const cachedKey = localStorage.getItem(`ai_api_key_${provider}`)
+    if (cachedKey && cachedKey.trim()) {
+      aiLog('info','getKeyForProvider.fromCache',{ provider })
+      return cachedKey
+    }
+    
+    // Priority 2: Check ai-settings (OLD)
+    try {
+      const raw = localStorage.getItem('ai-settings')
+      if (raw) {
+        const s = JSON.parse(raw)
+        const k = s?.keys?.[provider]
+        if (k && String(k).trim()) {
+          aiLog('info','getKeyForProvider.fromSettings',{ provider })
+          // Cache it for next time
+          localStorage.setItem(`ai_api_key_${provider}`, k)
+          return String(k).trim()
+        }
+      }
+    } catch (e) {}
+    
+    // Priority 3: Check general ai_api_key (OLD)
+    const localKey = String(localStorage.getItem('ai_api_key')||'').trim()
+    if (localKey) {
+      aiLog('info','getKeyForProvider.fromLocalKey',{ provider })
+      // Cache it for next time
+      localStorage.setItem(`ai_api_key_${provider}`, localKey)
+      return localKey
+    }
+    
+    // Priority 4: Auto-load dari backend (NEW + FALLBACK)
+    const backendKey = await loadApiKeyFromBackend(provider)
+    if (backendKey) {
+      aiLog('info','getKeyForProvider.fromBackend',{ provider })
+      return backendKey
+    }
+    
+    return null
+  } catch (e) {
+    aiLog('warn','getKeyForProvider.error',{ provider, error: String(e) })
+    return null
+  }
+}
+
 // Mount AI generator into the main page (#aiMainContainer)
 function mountAIGeneratorMain(){
   try{
@@ -263,9 +474,17 @@ function mountAIGeneratorMain(){
     const root = document.getElementById('aiMainContainer')
     if(!root){ console.error('mountAIGeneratorMain: aiMainContainer not found'); return }
 
+    const displayName = (typeof localStorage !== 'undefined' && localStorage.getItem('auth_username')) || 'User'
+    const profileInitial = (displayName.charAt(0) || 'U').toUpperCase()
+    const esc = (s) => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML }
+
   root.innerHTML = `
     <div class="app-shell">
       <aside class="sidebar panel">
+        <div class="sidebar-profile">
+          <div class="sidebar-avatar" aria-hidden="true">${esc(profileInitial)}</div>
+          <span class="sidebar-username">${esc(displayName)}</span>
+        </div>
         <div class="nav-item active" data-action="generator"><svg viewBox="0 0 24 24"><path d="M12 2L2 7v6c0 5 3.7 9.2 9 11 5.3-1.8 9-6 9-11V7l-10-5z"/></svg><span class="nav-label">Generator</span></div>
         <div class="nav-item" data-action="history"><svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 1 0 9 9h-2a7 7 0 1 1-7-7V3z"/></svg><span class="nav-label">History</span></div>
         <div class="nav-item" data-action="presets"><svg viewBox="0 0 24 24"><path d="M12 7a5 5 0 1 0 5 5 5 5 0 0 0-5-5z"/></svg><span class="nav-label">Presets</span></div>
@@ -279,27 +498,30 @@ function mountAIGeneratorMain(){
         <div class="content-main">
           <section class="left-col">
             <div class="panel card">
-              <input id="aiMainTitle" placeholder="Topic / Title" style="width:96%;padding:10px;border-radius:8px;border:1px solid #80808042;background:var(--card);color:#fff;margin-bottom:4px" />
-              <div id="aiTitleCounter" class="char-counter" style="font-size:11px;margin-bottom:8px;min-height:14px">0 / 60</div>
-              <textarea id="aiMainOverview" placeholder="Overview / Description" style="width:96%;padding:10px;border-radius:8px;border:1px solid #80808042;background:var(--card);color:#fff"></textarea>
-              <div id="aiOverviewCounter" class="char-counter" style="font-size:11px;margin-top:4px;min-height:14px">0 words</div>
-              <div style="display:flex;flex-wrap: wrap;gap:8px;align-items:center;margin-top:10px">
-                <select id="aiLangSelect" style="padding:8px;border-radius:8px;background:#0b1218;color:#fff;border:none">
-                  <option value="id">Indonesia</option>
-                  <option value="en">English</option>
-                </select>
-                <select id="aiKeywordSelect" style="padding:8px;border-radius:8px;background:#0b1218;color:#fff;border:none">
-                  <option value="">(auto)</option>
-                </select>
-                  <label style="font-size:12px;margin-left:6px;display:flex;align-items:center;gap:6px"><input id="aiKeywordUseAI" type="checkbox" /> Use AI</label>
+              <input id="aiMainTitle" class="form-input" placeholder="Topic / Title" />
+              <div id="aiTitleCounter" class="char-counter" style="font-size:11px;margin:5px;min-height:14px">0 / 60</div>
+              <textarea id="aiMainOverview" class="form-textarea" placeholder="Overview / Description"></textarea>
+              <div id="aiOverviewCounter" class="char-counter" style="font-size:11px;margin-top:4px;margin-left:5px;min-height:14px">0 words</div>
+              <div style="display:flex;flex-direction:column;gap:10px;margin-top:10px">
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                  <select id="aiLangSelect" class="form-select" style="flex:1;min-width:120px">
+                    <option value="id">Indonesia</option>
+                    <option value="en">English</option>
+                  </select>
+                  <select id="aiKeywordSelect" class="form-select" style="flex:1;min-width:120px">
+                    <option value="">(auto)</option>
+                  </select>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                  <label style="font-size:12px;display:flex;align-items:center;gap:6px"><input id="aiKeywordUseAI" type="checkbox" /> Use AI</label>
                   <button id="aiKeywordSuggestBtn" class="secondary">Suggest</button>
-                <select id="aiToneSelect" style="padding:8px;border-radius:8px;background:#0b1218;color:#fff;border:none">
-                  <option value="neutral">Neutral</option>
-                  <option value="energetic">Energetic</option>
-                  <option value="dramatic">Dramatic</option>
-                  <option value="friendly">Friendly</option>
-                </select>
-                <div style="flex:1"></div>
+                  <select id="aiToneSelect" class="form-select" style="flex:1;min-width:120px">
+                    <option value="neutral">Neutral</option>
+                    <option value="energetic">Energetic</option>
+                    <option value="dramatic">Dramatic</option>
+                    <option value="friendly">Friendly</option>
+                  </select>
+                </div>
                 <div class="generate-row">
                   <button id="aiGenerateBtn" class="primary">Generate Content</button>
                   <button id="aiVariationsBtn" class="secondary">Buat 3 variasi</button>
@@ -310,11 +532,11 @@ function mountAIGeneratorMain(){
 
             <div class="panel card">
               <h4 style="margin:0 0 8px 0">Presets</h4>
-              <div style="display:flex;gap:8px;align-items:center">
-                <select id="aiPresetSelect" style="flex:1;padding:8px;border-radius:6px;background:#0b1218;border:none;color:#fff">
+              <div style="display:flex;gap:8px;align-items:stretch;flex-wrap:wrap">
+                <select id="aiPresetSelect" class="form-select" style="flex:1;min-width:150px">
                   <option value="">(Manual - no preset)</option>
                 </select>
-                <button id="managePresetsBtn" class="secondary">Manage</button>
+                <button id="managePresetsBtn" class="secondary" style="min-width:100px">Manage</button>
               </div>
             </div>
 
@@ -340,7 +562,7 @@ function mountAIGeneratorMain(){
     headerEl.innerHTML = `
       <div class="panel" style="display:flex;gap:10px;align-items:center;justify-content:flex-end;flex-direction: row-reverse;">
         <button id="sidebarToggle" class="burger-btn" aria-label="Menu" title="Menu"><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
-        <h1 class="app-header-title">AI Content Generator untuk FYP &amp; Viral</h1>
+        <h1 class="app-header-title">AI Content Generator FYP &amp; Viral</h1>
         <div class="logo">
         <image src="./img/logo.svg" alt="Genco Logo" width="32" height="32" />
         </div>
@@ -379,11 +601,9 @@ function mountAIGeneratorMain(){
             <option value="pinterest">Pinterest</option>
           </select>
         </div>
-        <div style="display:flex;gap:8px">
-          <button class="primary" id="gotoGenerator">Generator</button>
-          <button id="gotoHistory">History</button>
-          <button id="gotoPreset">Preset</button>
-        </div>
+        <div style="display:flex;gap:8px;justify-content:center">
+          <div class="stat_serv" id="Status-server"></div>
+           </div>
       `
 
       if(mainEl){
@@ -394,6 +614,8 @@ function mountAIGeneratorMain(){
         headerEl.insertAdjacentElement('afterend', cp)
       }
       console.debug('mountAIGeneratorMain: control panel inserted')
+      // populate backend status indicator in header
+      updateBackendStatusIndicator('Status-server')
     }
   })()
 
@@ -420,7 +642,8 @@ function mountAIGeneratorMain(){
   const providerFromSettings = localStorage.getItem('ai_provider') || ''
   if(providerEl && providerFromSettings) providerEl.value = providerFromSettings
   providerEl?.addEventListener('change', ()=> loadModelsFor(providerEl.value || 'gemini', modelEl))
-  loadModelsFor(providerEl?.value || 'gemini', modelEl)
+  // load models for initial provider (fire & forget, async)
+  loadModelsFor(providerEl?.value || 'gemini', modelEl).catch(e => console.warn('initial loadModelsFor failed', e))
 
   // wire manage button (dropdown will be populated after updatePresetDropdown is defined)
   document.getElementById('managePresetsBtn')?.addEventListener('click', ()=> showView('presets'))
@@ -489,7 +712,25 @@ function mountAIGeneratorMain(){
         if(action === 'settings') showView('settings')
         else if(action === 'presets') showView('presets')
         else if(action === 'history') showView('history')
-        else if(action === 'logout') { try{ localStorage.removeItem('auth_token') }catch(e){}; window.location.href = 'login.html'; }
+        else if(action === 'logout') {
+          (async ()=>{
+            const backend = getBackendURL()
+            try{
+              if(backend){
+                await fetch(String(backend).replace(/\/+$/,'') + '/auth/logout', { method: 'POST', credentials: 'include', headers: getAuthHeaders({'Content-Type':'application/json'}) })
+              }
+            }catch(e){ console.warn('logout request failed', e) }
+            try{ localStorage.removeItem('auth_token') }catch(e){}
+            try{
+              // clear cached API keys inserted by app
+              for(const k of Object.keys(localStorage)){
+                if(String(k || '').startsWith('ai_api_key_')) localStorage.removeItem(k)
+              }
+              sessionStorage.clear()
+            }catch(e){}
+            window.location.href = 'login.html'
+          })()
+        }
         else showView('generator')
         // close sidebar on mobile
         if(document.body.classList.contains('sidebar-open')) document.body.classList.remove('sidebar-open')
@@ -513,20 +754,26 @@ function mountAIGeneratorMain(){
     placeholder.innerHTML = `
       <div class="panel settings-page">
         <h2 style="margin-top:0">Settings</h2>
-        <div class="control-pane">
+        <form class="control-pane" onsubmit="event.preventDefault();">
           <div class="control-group">
+              <div class="control-label" style="display:flex;align-items:center;gap:8px">
               <label>Backend URL</label>
+              <div id="presetsBackendIndicator" style="margin-left:8px;font-size:12px;color:#6a8;padding:6px 8px;background:rgba(0,40,20,0.3);border-radius:6px;border:1px solid rgba(106,168,136,0.2);display:flex;align-items:center;gap:6px;font-family:monospace">🔴 OFFLINE</div>
+              </div>
               <div style="display:flex;gap:8px;align-items:center">
-                <input id="settingsBackendURL" type="text" style="flex:1" placeholder="https://your-backend.workers.dev" />
-                <button id="settingsBackendTest" class="secondary">Test</button>
-                <button id="settingsBackendSave" class="primary">Save</button>
+                <div style="display:flex;gap:8px;align-items:center;flex:1">
+                  <input id="settingsBackendURL" class="form-input" type="text" style="flex:1" placeholder="https://your-backend.workers.dev" />
+                  <button id="settingsBackendTest" type="button" class="secondary">Test</button>
+                  <button id="settingsBackendSave" type="button" class="primary">Save</button>
+                </div>
+                
               </div>
               <div style="font-size:12px;margin-top:6px;color:#c9d0b3">Backend untuk AI dan penyimpanan presets. Lokal (mis. http://127.0.0.1:8787) = simpan di project; external (mis. workers.dev) = simpan di server tersebut.</div>
             </div>
 
             <div class="control-group">
               <label>Default provider</label>
-              <select id="settingsDefaultProvider">
+              <select id="settingsDefaultProvider" class="form-select">
                 <option value="gemini">Gemini</option>
                 <option value="openai">OpenAI</option>
                 <option value="openrouter">OpenRouter</option>
@@ -538,13 +785,16 @@ function mountAIGeneratorMain(){
               </select>
             </div>
 
+             <label id="settingsKeyLabel">API Key</label>
+             <input id="settingsKey_single" class="form-input" type="password" style="flex:1" placeholder="sk-..." />
+
           <div class="control-group">
-            <label id="settingsKeyLabel">API Key</label>
+           
             <div style="display:flex;gap:8px;align-items:center">
-              <input id="settingsKey_single" type="password" style="flex:1" placeholder="sk-..." />
-              <button id="settingsShowBtn" class="secondary">Show</button>
-              <button id="testKey_single" class="primary">Test</button>
-              <button id="settingsDeleteBtn" class="secondary">Delete from server</button>
+              
+              <button id="settingsShowBtn" type="button" class="secondary">Show</button>
+              <button id="testKey_single" type="button" class="primary">Test</button>
+              <button id="settingsDeleteBtn" type="button" class="secondary">Delete from server</button>
             </div>
             <div id="settingsServerStatus" style="font-size:12px;margin-top:6px;color:#c9d0b3"></div>
           </div>
@@ -553,15 +803,39 @@ function mountAIGeneratorMain(){
             <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="settingsRemember" /> Remember API keys</label>
           </div>
 
+          <div style="display:flex;gap:10px;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid var(--border-color)">
+            <span style="font-size:14px">Theme:</span>
+            <button id="settingsThemeToggle" type="button" class="theme-settings-btn secondary" aria-label="Toggle dark/light mode">
+              <svg class="icon-sun-settings" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none; margin-right:4px;">
+                <circle cx="12" cy="12" r="5"></circle>
+                <line x1="12" y1="1" x2="12" y2="3"></line>
+                <line x1="12" y1="21" x2="12" y2="23"></line>
+                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                <line x1="1" y1="12" x2="3" y2="12"></line>
+                <line x1="21" y1="12" x2="23" y2="12"></line>
+                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+              </svg>
+              <svg class="icon-moon-settings" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:4px;">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+              </svg>
+              <span class="theme-label">Light</span>
+            </button>
+          </div>
+
           <div style="display:flex;gap:8px;margin-top:12px">
-            <button id="settingsSaveBtn" class="primary">Save</button>
-            <button id="settingsCancelBtn" class="secondary">Close</button>
+            <button id="settingsSaveBtn" type="button" class="primary">Save</button>
+            <button id="settingsCancelBtn" type="button" class="secondary">Close</button>
           </div>
 
           <div id="settingsStatus" class="status info" style="display:none;margin-top:12px"></div>
-        </div>
-      </div>
+        </form>
+          </div>
     `
+
+        // update the backend status indicator now that element exists in Settings
+        updateBackendStatusIndicator('presetsBackendIndicator')
 
     function showStatus(msg, type='info'){
       const el = document.getElementById('settingsStatus')
@@ -609,7 +883,10 @@ function mountAIGeneratorMain(){
         try{
           const controller = new AbortController()
           const timer = setTimeout(()=>controller.abort(), 800)
-          const res = await fetch(backendURL + '/ai/debug', { signal: controller.signal })
+          const res = await fetch(backendURL + '/ai/debug', { 
+            signal: controller.signal,
+            headers: getAuthHeaders()
+          })
           clearTimeout(timer)
           if(res && res.ok){
             try{ await loadKeyForProvider(prov) }catch(e){ /* ignore */ }
@@ -647,14 +924,24 @@ function mountAIGeneratorMain(){
       }
 
       aiLog('info','getKey.request',{ provider, backendURL })
-      fetch(`${backendURL}/ai/get-key?provider=${encodeURIComponent(provider)}`)
+      // request full key when possible (frontend includes Authorization header)
+      fetch(`${backendURL}/ai/get-key?provider=${encodeURIComponent(provider)}&full=true`, {
+        headers: getAuthHeaders()
+      })
         .then(r=>r.json())
         .then(j=>{
           aiLog('info','getKey.response',{ provider, result: j })
-          try{ document.getElementById('settingsKey_single').value = (!j?.error ? (j.apiKey || (s.keys?.[provider] || '')) : (s.keys?.[provider] || '')) }catch(e){}
+          try{
+            // if server returned a masked key (fallback) use stored key instead
+            const serverKey = (!j?.error ? (j.apiKey || '') : '')
+            const useKey = (serverKey && serverKey.includes('...')) ? (s.keys?.[provider] || '') : serverKey || (s.keys?.[provider] || '')
+            document.getElementById('settingsKey_single').value = useKey
+          }catch(e){}
           // Query debug endpoint to show whether KV is bound in this runtime
           try{
-            fetch(`${backendURL}/ai/debug`).then(r2=>r2.json()).then(dj=>{
+            fetch(`${backendURL}/ai/debug`, {
+              headers: getAuthHeaders()
+            }).then(r2=>r2.json()).then(dj=>{
               const statusEl2 = document.getElementById('settingsServerStatus')
               if(!statusEl2) return
               if(dj && dj.kvBound) statusEl2.textContent = 'Server: KV bound (keys persisted)'
@@ -664,20 +951,126 @@ function mountAIGeneratorMain(){
         }).catch(err=>{ aiLog('error','getKey.error',{ provider, error: String(err) }); try{ document.getElementById('settingsKey_single').value = s.keys?.[provider] || '' }catch(e){} })
     }
 
-    function testKey(){
+    /**
+     * Test API key dengan POST request (aman, tidak expose key di URL)
+     * @returns {Promise<void>}
+     */
+    async function testKey(){
       const provider = document.getElementById('settingsDefaultProvider').value
       const input = document.getElementById('settingsKey_single')
-      const key = input ? String(input.value||'').trim() : ''
-      if(!key) return showStatus('API key is empty', 'error')
-      showStatus('Testing key...', 'info')
+      let key = input ? String(input.value||'').trim() : ''
+
+      // If key looks masked (e.g. "abcd..."), try to restore full key from backend
+      if(key && key.includes('...')){
+        const full = await loadApiKeyFromBackend(provider)
+        if(full){ key = String(full).trim(); try{ if(input) input.value = key }catch(e){} }
+        else return showStatus('❌ API key ter-mask — silahkan login atau masukkan ulang API key', 'error')
+      }
+
+      if(!key) return showStatus('❌ API key tidak boleh kosong', 'error')
+      
       const backendURL = getBackendURL()
-      if(!backendURL) return showStatus('Backend URL not configured', 'error')
-      fetch(`${backendURL}/ai/models?provider=${encodeURIComponent(provider)}&apiKey=${encodeURIComponent(key)}`)
-        .then(r=>r.json()).then(j=>{
-          if(j?.error) throw new Error(j.error)
-          if(Array.isArray(j?.models)) showStatus('Key valid — '+(j.models.length)+' models available', 'success')
-          else showStatus('Key looks valid', 'success')
-        }).catch(err=> showStatus('Key test failed: '+String(err?.message||err), 'error'))
+      if(!backendURL) return showStatus('❌ Backend URL tidak dikonfigurasi', 'error')
+      
+      // Disable button, show loading
+      const btn = document.getElementById('testKey_single')
+      const originalText = btn?.textContent || 'Test'
+      if(btn){ btn.disabled = true; btn.textContent = '⏳ Testing...' }
+      
+      try {
+        // Setup timeout 8 detik
+        const controller = new AbortController()
+        const timeoutId = setTimeout(()=> controller.abort(), 8000)
+        
+        // POST request dengan API key di body (aman)
+        const response = await fetch(`${backendURL}/ai/models`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+          body: JSON.stringify({ provider, apiKey: key }),
+          signal: controller.signal
+        })
+        
+        clearTimeout(timeoutId)
+        
+        // Handle status 401 (session expired)
+        if(response.status === 401){
+          showStatus('🔐 Session expired - silahkan login ulang', 'error')
+          return
+        }
+        
+        // Handle status 400 (invalid request)
+        if(response.status === 400){
+          const errorData = await response.json().catch(()=>({}))
+          showStatus(`❌ ${errorData.error || 'Invalid request - periksa provider name'}`, 'error')
+          aiLog('warn', 'testKey.400', { provider, error: errorData.error })
+          return
+        }
+        
+        // Handle status 429 (rate limit)
+        if(response.status === 429){
+          showStatus('⚠️ Rate limit - tunggu sebelum test lagi', 'warn')
+          return
+        }
+        
+        // Handle status 500 (server error)
+        if(response.status === 500){
+          const errorData = await response.json().catch(()=>({}))
+          // Check if error adalah karena invalid key (common keywords dari API providers)
+          const errorMsg = String(errorData.error || '').toLowerCase()
+          const isInvalidKeyError = errorMsg.includes('invalid') || 
+                                    errorMsg.includes('unauthorized') || 
+                                    errorMsg.includes('not valid') ||
+                                    errorMsg.includes('api key') ||
+                                    errorMsg.includes('authentication')
+          
+          if(isInvalidKeyError){
+            showStatus(`❌ Invalid API key - pastikan key benar\nDetail: ${errorData.error}`, 'error')
+            aiLog('warn', 'testKey.invalid', { provider, error: errorData.error })
+          } else {
+            showStatus(`🔴 Backend error (500) - tim support sedang perbaiki\nDetail: ${errorData.error || 'Unknown error'}`, 'error')
+            aiLog('error', 'testKey.500', { provider, error: errorData.error })
+          }
+          return
+        }
+        
+        // Handle other errors
+        if(!response.ok){
+          showStatus(`❌ HTTP ${response.status} - ${response.statusText}`, 'error')
+          aiLog('warn', 'testKey.http', { status: response.status, statusText: response.statusText })
+          return
+        }
+        
+        // Success response
+        const data = await response.json()
+        
+        if(data.models && Array.isArray(data.models)){
+          showStatus(`✅ API key valid!\nDitemukan ${data.models.length} model tersedia`, 'success')
+          aiLog('info', 'testKey.success', { provider, modelCount: data.models.length })
+        } else if(data.success || data.ok){
+          showStatus('✅ API key valid!', 'success')
+          aiLog('info', 'testKey.success', { provider })
+        } else {
+          showStatus('❌ API key validation gagal - cek format', 'error')
+          aiLog('warn', 'testKey.noModels', { provider, response: data })
+        }
+        
+      } catch(error){
+        aiLog('error', 'testKey.catch', { provider, error: String(error) })
+        
+        if(error.name === 'AbortError'){
+          showStatus('⏱️ Request timeout (>8s) - backend/AI provider lambat', 'error')
+        } else if(error.message.includes('Failed to fetch')){
+          showStatus('🌐 Network error - cek koneksi atau backend URL salah', 'error')
+        } else {
+          showStatus(`⚠️ Error: ${error.message}`, 'error')
+        }
+      } finally {
+        // Restore button state
+        if(btn){ 
+          btn.disabled = false
+          btn.textContent = originalText
+        }
+      }
     }
 
     async function saveSettingsFromForm(){
@@ -700,7 +1093,7 @@ function mountAIGeneratorMain(){
         aiLog('info','saveKey.request',{ provider, backendURL })
         const res = await fetch(`${backendURL}/ai/save-key`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
           body: JSON.stringify({ provider, apiKey })
         })
         const j = await res.json().catch(()=>({}))
@@ -721,7 +1114,7 @@ function mountAIGeneratorMain(){
           }catch(e){}
           showStatus('Settings disimpan di backend', 'success')
           const provEl = document.getElementById('aiProviderSelect')
-          if(provEl){ provEl.value = provider; loadModelsFor(provider, document.getElementById('aiModelSelect')) }
+          if(provEl){ provEl.value = provider; loadModelsFor(provider, document.getElementById('aiModelSelect')).catch(e => console.warn('loadModelsFor after save failed', e)) }
         }else{
           throw new Error(j?.error || 'Save failed')
         }
@@ -740,6 +1133,15 @@ function mountAIGeneratorMain(){
       }catch(e){ /* ignore */ }
     })
 
+    // setup theme toggle button (settings page)
+    const settingsThemeBtn = document.getElementById('settingsThemeToggle')
+    if(settingsThemeBtn && window.ThemeManager){
+      settingsThemeBtn.addEventListener('click', (e)=>{
+        e.preventDefault()
+        window.ThemeManager.toggle()
+      })
+    }
+
     // show/hide API key
     const showBtn = document.getElementById('settingsShowBtn')
     showBtn?.addEventListener('click', ()=>{
@@ -751,24 +1153,96 @@ function mountAIGeneratorMain(){
 
     // delete key from server (if backend bound)
     const delBtn = document.getElementById('settingsDeleteBtn')
+    console.debug('[settings.deleteKey] wiring delete button, found:', !!delBtn)
+    if(delBtn) delBtn.addEventListener('click', ()=> console.debug('[settings.deleteKey] DOM click event fired (early)'))
     delBtn?.addEventListener('click', async ()=>{
+      console.debug('[settings.deleteKey] click handler invoked')
       const provider = document.getElementById('settingsDefaultProvider').value
-      const backendURL = (window.APP_CONFIG && window.APP_CONFIG.backendURL) ? window.APP_CONFIG.backendURL : (window.AI && window.AI.backendURL) ? window.AI.backendURL : ''
-      if(!backendURL) return showStatus('Backend URL not configured', 'error')
-      if(!confirm('Delete stored API key for "'+provider+'" from server?')) return
-      showStatus('Deleting key from server...', 'info')
-      try{
-        const res = await fetch(`${backendURL}/ai/delete-key?provider=${encodeURIComponent(provider)}`, { method: 'DELETE' })
-        const j = await res.json().catch(()=>({}))
-        if(res.ok && j?.ok){
-          showStatus('Key deleted from server', 'success')
-          // clear displayed value and local copies
-          try{ document.getElementById('settingsKey_single').value = '' }catch(e){}
-          try{ const s = getStoredAI(); if(s && s.keys) s.keys[provider] = ''; saveSettings(s) }catch(e){}
-        }else{
-          throw new Error(j?.error || 'Delete failed')
+      // prefer getBackendURL() helper, fallback to globals
+      let backendURL = ''
+      try{ backendURL = getBackendURL() || (window.APP_CONFIG && window.APP_CONFIG.backendURL) || (window.AI && window.AI.backendURL) || '' }catch(e){ backendURL = '' }
+      if(!backendURL) return showStatus('Backend URL tidak dikonfigurasi', 'error')
+
+      // async confirm + delete with improved error handling and timeout
+      (async ()=>{
+        const debugEl = document.getElementById('settingsServerStatus') || document.getElementById('settingsStatus')
+        try{
+          let confirmed = false
+          if(typeof window.showDeleteConfirm === 'function'){
+            confirmed = await window.showDeleteConfirm('API Key untuk ' + provider)
+          } else {
+            confirmed = confirm('Hapus API key "'+provider+'" dari server? (Tindakan tidak bisa dibatalkan)')
+          }
+          if(!confirmed) return
+          showStatus('Menghapus kunci API dari server...', 'info')
+          if(debugEl) debugEl.textContent = 'DEBUG: initiating DELETE to server...'
+
+          const controller = new AbortController()
+          const to = setTimeout(()=> controller.abort(), 8000)
+          let res
+          const targetUrl = `${backendURL}/ai/delete-key?provider=${encodeURIComponent(provider)}`
+          const authHeaders = getAuthHeaders()
+          const authPresent = !!(authHeaders && (authHeaders.Authorization || authHeaders.authorization))
+          console.debug('[settings.deleteKey] request', { provider, targetUrl, authPresent })
+          if(debugEl) debugEl.textContent = `DEBUG: ${targetUrl} (auth: ${authPresent? 'present':'absent'})`
+          try{
+            res = await fetch(targetUrl, { 
+              method: 'DELETE',
+              headers: authHeaders,
+              signal: controller.signal
+            })
+          }catch(fetchErr){
+            clearTimeout(to)
+            console.error('[settings.deleteKey] fetch error', fetchErr)
+            if(debugEl) debugEl.textContent = 'DEBUG: fetch error: '+String(fetchErr?.message||fetchErr)
+            return showStatus('Gagal menghubungi server: '+String(fetchErr?.message||fetchErr), 'error')
+          }
+          clearTimeout(to)
+
+          let j = {}
+          try{ j = await res.json() }catch(e){ j = {} }
+          console.debug('[settings.deleteKey] response', { status: res.status, ok: res.ok, body: j })
+          if(debugEl) debugEl.textContent = 'DEBUG: response '+res.status+' - '+(j && j.error ? j.error : (j && j.ok? 'ok':'no body'))
+
+          if(res.ok && j?.ok){
+            showStatus('API key dihapus dari server', 'success')
+            // clear displayed value and local copies (localStorage + sessionStorage)
+            try{ document.getElementById('settingsKey_single').value = '' }catch(e){}
+            try{
+              const s = getStoredAI()
+              if(s && s.keys) s.keys[provider] = ''
+              saveSettings(s)
+              // remove any persisted/session copies of the active provider key
+              try{ localStorage.removeItem('ai_api_key') }catch(e){}
+              try{ sessionStorage.removeItem('ai_api_key') }catch(e){}
+              try{ localStorage.removeItem('ai_provider') }catch(e){}
+              try{ sessionStorage.removeItem('ai_provider') }catch(e){}
+              // propagate to AppSettings if present
+              try{ window.AppSettings && typeof window.AppSettings.saveAI === 'function' && window.AppSettings.saveAI(s) }catch(e){}
+            }catch(e){}
+          }else{
+            // Server-side deletion failed; log and still clear local copies so user isn't left with keys in browser
+            const errMsg = j?.error || `${res.status} ${res.statusText}`
+            console.warn('[settings.deleteKey] server error', res.status, errMsg)
+            try{ document.getElementById('settingsKey_single').value = '' }catch(e){}
+            try{
+              const s = getStoredAI()
+              if(s && s.keys) s.keys[provider] = ''
+              saveSettings(s)
+              try{ localStorage.removeItem('ai_api_key') }catch(e){}
+              try{ sessionStorage.removeItem('ai_api_key') }catch(e){}
+              try{ localStorage.removeItem('ai_provider') }catch(e){}
+              try{ sessionStorage.removeItem('ai_provider') }catch(e){}
+              try{ window.AppSettings && typeof window.AppSettings.saveAI === 'function' && window.AppSettings.saveAI(s) }catch(e){}
+            }catch(e){}
+            showStatus('Gagal menghapus di server: '+String(errMsg||'')+'. Local keys dihapus saja.', 'warning')
+          }
+        }catch(e){ 
+          console.error('[settings.deleteKey] error:', e)
+          if(document.getElementById('settingsServerStatus')) document.getElementById('settingsServerStatus').textContent = 'DEBUG error: '+String(e?.message||e)
+          showStatus('Gagal menghapus API key: '+String(e?.message||e), 'error') 
         }
-      }catch(e){ showStatus('Delete failed: '+String(e?.message||e), 'error') }
+      })()
     })
     document.getElementById('settingsSaveBtn')?.addEventListener('click', saveSettingsFromForm)
     // backend test button: ping /ai/debug
@@ -780,7 +1254,9 @@ function mountAIGeneratorMain(){
       if(!url) return showStatus('Backend URL kosong','error')
       showStatus('Testing backend...', 'info')
       try{
-        const r = await fetch(url + '/ai/debug')
+        const r = await fetch(url + '/ai/debug', {
+          headers: getAuthHeaders()
+        })
         const j = await r.json().catch(()=>({}))
         if(j && j.ok) showStatus('Backend reachable — KV bound: '+Boolean(j.kvBound), 'success')
         else showStatus('Backend responded but unexpected body', 'error')
@@ -922,16 +1398,40 @@ function mountAIGeneratorMain(){
     const presets = window.PresetsManager.list()
     placeholder.innerHTML = `
       <div class="panel presets-page">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <h2>Presets (Manage)</h2>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h2 style="margin:0">Presets (Manage)</h2>
           <button id="presetsCloseBtn" class="secondary">Close</button>
         </div>
-        <div id="presetsList" style="display:flex;flex-direction:column;gap:8px;margin-top:10px"></div>
+        
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+          <input id="presetSearchInput" type="text" class="form-input" placeholder="🔍 Cari preset..." style="flex:1;min-width:150px" />
+          <select id="presetFilterPlatform" class="form-select" style="min-width:120px">
+            <option value="">(Platform)</option>
+            <option value="youtube">YouTube</option>
+            <option value="tiktok">TikTok</option>
+            <option value="instagram">Instagram</option>
+            <option value="shopee">Shopee</option>
+          </select>
+          <select id="presetFilterGoal" class="form-select" style="min-width:120px">
+            <option value="">(Goal)</option>
+            <option value="Viral">Viral</option>
+            <option value="FYP">FYP</option>
+            <option value="Follower">Follower</option>
+            <option value="Penjualan">Penjualan</option>
+          </select>
+          <button id="presetResetFilterBtn" class="secondary">Reset</button>
+        </div>
+        
+        <div id="presetFilterStats" style="font-size:11px;color:#888;margin-bottom:8px;padding:6px 8px;background:rgba(100,100,100,0.1);border-radius:4px">
+          Menampilkan: <b><span id="presetCountShowing">0</span>/<span id="presetCountTotal">0</span></b> preset
+        </div>
+        
+        <div id="presetsList" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:12px;margin-top:8px"></div>
         <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-          <input id="newPresetName" placeholder="Nama preset baru" style="flex:1;min-width:160px;padding:8px;border-radius:6px;background:#0b1218;border:none;color:#fff" />
+          <input id="newPresetName" class="form-input" placeholder="Nama preset baru" style="flex:1;min-width:160px" />
           <button id="createPresetBtn" class="primary">Buat</button>
         </div>
-        <div id="presetsBackendIndicator" style="margin-top:10px;font-size:11px;color:#6a8;padding:6px 8px;background:rgba(0,40,20,0.3);border-radius:6px"></div>
+        
         <div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.08);display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <span style="font-size:12px;color:#888">Backup aman (simpan ke file):</span>
           <button id="presetsExportBackupBtn" class="secondary" type="button">Export backup (.json)</button>
@@ -943,38 +1443,93 @@ function mountAIGeneratorMain(){
       </div>
     `
 
-    // Tampilkan backend aktif: presets selalu disimpan ke backend ini (lokal atau external)
-    const presetsBackendIndicator = document.getElementById('presetsBackendIndicator')
-    if (presetsBackendIndicator) {
-      const url = (window.PresetsManager && window.PresetsManager.getBackendURL()) || ''
-      if (url) {
-        const token = localStorage.getItem('auth_token')
-        if (!token) {
-          presetsBackendIndicator.textContent = `Backend: ${url} — Login diperlukan`;
-          presetsBackendIndicator.style.background = 'rgba(80,30,20,0.25)';
-        } else {
-          presetsBackendIndicator.textContent = `Backend: ${url}`;
-        }
-        const isLocal = /127\.0\.0\.1|localhost|^https?:\/\/\[?::1\]?/i.test(url)
-        let info = 'Presets disimpan ke backend: ' + (isLocal ? 'Lokal (project)' : 'External') + ' — ' + url
-        if (!token) info += ' (login diperlukan)'
-        presetsBackendIndicator.textContent = info
-      } else {
-        presetsBackendIndicator.textContent = 'Presets hanya di browser. Set Backend URL di Settings agar tersimpan ke server.'
-      }
-    }
+    // presetsBackendIndicator moved to Settings page; ensure no stale call remains here
 
     function renderList(){
       const listEl = document.getElementById('presetsList')
       listEl.innerHTML = ''
       const items = window.PresetsManager.list()
+      // fetch storage to read _serverSynced flags
+      const storage = (window.PresetsManager && typeof window.PresetsManager.getStorage === 'function') ? window.PresetsManager.getStorage() : { userPresets: {} }
       items.forEach(it=>{
         const el = document.createElement('div')
         el.style.display = 'flex'
         el.style.justifyContent = 'space-between'
         el.style.alignItems = 'center'
         el.style.gap = '8px'
-        el.innerHTML = `<div style="font-weight:600">${it.label}</div><div style="display:flex;gap:8px"><button class="small" data-preset="${it.key}" data-action="edit">Edit</button><button class="small" data-preset="${it.key}" data-action="delete">Delete</button></div>`
+        el.style.padding = '10px'
+        el.style.borderRadius = '8px'
+        el.style.background = 'rgba(255,255,255,0.02)'
+        el.style.border = '1px solid rgba(255,255,255,0.04)'
+
+        // left: status dot + title + subtitle (dot moved left of name for cleaner layout)
+        const left = document.createElement('div')
+        left.style.display = 'flex'
+        left.style.alignItems = 'center'
+        left.style.gap = '10px'
+
+        // status dot (only for user presets)
+        if(!it.builtin){
+          const synced = storage.userPresets && storage.userPresets[it.key] && storage.userPresets[it.key]._serverSynced
+          const dot = document.createElement('span')
+          dot.style.width = '12px'
+          dot.style.height = '12px'
+          dot.style.borderRadius = '50%'
+          dot.style.display = 'inline-block'
+          dot.title = synced ? 'Tersinkron ke server' : 'Belum tersinkron (lokal)'
+          dot.style.background = synced ? '#26a54a' : '#e09b2d'
+          dot.style.flex = '0 0 auto'
+          left.appendChild(dot)
+        }
+
+        const textWrap = document.createElement('div')
+        textWrap.style.display = 'flex'
+        textWrap.style.flexDirection = 'column'
+        textWrap.style.gap = '4px'
+        const title = document.createElement('div')
+        title.style.fontWeight = '600'
+        title.textContent = it.label
+        const subtitle = document.createElement('div')
+        subtitle.style.fontSize = '12px'
+        subtitle.style.color = '#aaa'
+        if(it.builtin) subtitle.textContent = 'Template • Built-in'
+        else {
+          const p = (storage.userPresets && storage.userPresets[it.key] && storage.userPresets[it.key].platform) ? storage.userPresets[it.key].platform : ''
+          subtitle.textContent = p ? `User preset • ${p}` : 'User preset'
+        }
+        textWrap.appendChild(title)
+        textWrap.appendChild(subtitle)
+        left.appendChild(textWrap)
+
+        // right: actions
+        const actions = document.createElement('div')
+        actions.style.display = 'flex'
+        actions.style.gap = '8px'
+        const editBtn = document.createElement('button')
+        editBtn.className = 'small btn-edit'
+        editBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"><path d="m8.492 11.265l-1.06 4.243l4.242-1.061l6.364-6.364L14.856 4.9zm13.259-6.894l1.06 1.06a1.5 1.5 0 0 1 0 2.122l-3.311 3.31m-1.462-2.78l3.713-3.712a1.5 1.5 0 0 0 0-2.121L20.69 1.189a1.5 1.5 0 0 0-2.121 0l-3.713 3.71"/><path d="M18.75 14.25v7.5a1.5 1.5 0 0 1-1.5 1.5h-15a1.5 1.5 0 0 1-1.5-1.5v-15a1.5 1.5 0 0 1 1.5-1.5h7.5"/></g></svg>'
+        editBtn.title = 'Edit'
+        editBtn.dataset.preset = it.key
+        editBtn.dataset.action = 'edit'
+        const delBtn = document.createElement('button')
+        delBtn.className = 'small btn-delete'
+        delBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"><path fill="currentColor" d="M7.616 20q-.672 0-1.144-.472T6 18.385V6H5V5h4v-.77h6V5h4v1h-1v12.385q0 .69-.462 1.153T16.384 20zM17 6H7v12.385q0 .269.173.442t.443.173h8.769q.23 0 .423-.192t.192-.424zM9.808 17h1V8h-1zm3.384 0h1V8h-1zM7 6v13z"/></svg>'
+        delBtn.title = 'Delete'
+        delBtn.dataset.preset = it.key
+        delBtn.dataset.action = 'delete'
+        if(it.builtin){ delBtn.disabled = true; delBtn.title = 'Builtin template — tidak bisa dihapus' }
+        const dlBtn = document.createElement('button')
+        dlBtn.className = 'small btn-download'
+        dlBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path stroke-dasharray="32" d="M12 21c-4.97 0 -9 -4.03 -9 -9c0 -4.97 4.03 -9 9 -9"><animate fill="freeze" attributeName="stroke-dashoffset" dur="0.6s" values="32;0"/></path><path stroke-dasharray="2 4" stroke-dashoffset="6" d="M12 3c4.97 0 9 4.03 9 9c0 4.97 -4.03 9 -9 9" opacity="0"><set fill="freeze" attributeName="opacity" begin="0.45s" to="1"/><animateTransform fill="freeze" attributeName="transform" begin="0.45s" dur="0.6s" type="rotate" values="-180 12 12;0 12 12"/><animate attributeName="stroke-dashoffset" begin="0.85s" dur="0.6s" repeatCount="indefinite" to="0"/></path><path stroke-dasharray="10" stroke-dashoffset="10" d="M12 8v7.5"><animate fill="freeze" attributeName="stroke-dashoffset" begin="0.85s" dur="0.2s" to="0"/></path><path stroke-dasharray="8" stroke-dashoffset="8" d="M12 15.5l3.5 -3.5M12 15.5l-3.5 -3.5"><animate fill="freeze" attributeName="stroke-dashoffset" begin="1.05s" dur="0.2s" to="0"/></path></g></svg>'
+        dlBtn.title = 'Download preset as JSON'
+        dlBtn.dataset.preset = it.key
+        dlBtn.dataset.action = 'download'
+        actions.appendChild(editBtn)
+        actions.appendChild(dlBtn)
+        actions.appendChild(delBtn)
+
+        el.appendChild(left)
+        el.appendChild(actions)
         listEl.appendChild(el)
       })
     }
@@ -997,7 +1552,7 @@ function mountAIGeneratorMain(){
       modal.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
           <h3 style="margin:0">Edit Preset: ${esc(key)}</h3>
-          <div style="display:flex;gap:8px">
+          <div style="display:flex;gap:8px;flex-wrap: wrap;">
             <button type="button" class="small" data-template="JualanViral">Jualan Viral</button>
             <button type="button" class="small" data-template="EdukasiViral">Edukasi Viral</button>
             <button type="button" class="small" data-template="BrandingViral">Branding Viral</button>
@@ -1010,9 +1565,9 @@ function mountAIGeneratorMain(){
             <summary style="cursor:pointer;font-weight:600;padding:6px 0">🧩 Section 1: Basic Info</summary>
             <div style="padding:8px 0 0 12px;display:flex;flex-direction:column;gap:8px">
               <label>Label Preset <span title="Digunakan untuk mengoptimalkan FYP dan SEO">?</span></label>
-              <input id="editLabel" placeholder="Viral Jualan Pro" value="${esc(data.label||key)}" style="max-width:320px" />
+              <input id="editLabel" class="form-input" placeholder="Viral Jualan Pro" value="${esc(data.label||key)}" style="max-width:320px" />
               <label>Platform</label>
-              <select id="editPlatform">
+              <select id="editPlatform" class="form-select">
                 <option value="tiktok" ${(data.platform||'')==='tiktok'?'selected':''}>TikTok</option>
                 <option value="youtube" ${(data.platform||'')==='youtube'?'selected':''}>YouTube Shorts</option>
                 <option value="shopee" ${(data.platform||'')==='shopee'?'selected':''}>Shopee</option>
@@ -1023,65 +1578,45 @@ function mountAIGeneratorMain(){
                 <option value="pinterest" ${(data.platform||'')==='pinterest'?'selected':''}>Pinterest</option>
               </select>
               <label>Tujuan Utama (Goal)</label>
-              <div style="display:flex;flex-wrap:wrap;gap:8px">
-                <label><input type="checkbox" name="editGoal" value="FYP" ${goalArr.includes('FYP')?'checked':''} /> FYP</label>
-                <label><input type="checkbox" name="editGoal" value="SEO" ${goalArr.includes('SEO')?'checked':''} /> SEO</label>
-                <label><input type="checkbox" name="editGoal" value="Viewer" ${goalArr.includes('Viewer')?'checked':''} /> Viewer</label>
-                <label><input type="checkbox" name="editGoal" value="Viral" ${goalArr.includes('Viral')?'checked':''} /> Viral</label>
-                <label><input type="checkbox" name="editGoal" value="Penjualan" ${goalArr.includes('Penjualan')?'checked':''} /> Penjualan</label>
-                <label><input type="checkbox" name="editGoal" value="Follower" ${goalArr.includes('Follower')?'checked':''} /> Follower</label>
-              </div>
+              <textarea id="editGoal" class="form-textarea" rows="3" placeholder="Contoh: FYP, SEO, Viewer atau Meningkatkan penjualan dengan hook kuat atau Viral di TikTok dan dapat follower baru. Jelaskan tujuan spesifik Anda...">${esc(Array.isArray(data.goal) ? data.goal.join(', ') : (data.goal || ''))}</textarea>
             </div>
           </details>
           <details class="preset-section">
             <summary style="cursor:pointer;font-weight:600;padding:6px 0">🧑‍💼 Section 2: AI Role & Audience</summary>
             <div style="padding:8px 0 0 12px;display:flex;flex-direction:column;gap:8px">
               <label>Peran AI (Role / Persona)</label>
-              <textarea id="editRole" rows="2" placeholder="Kamu adalah viral content strategist dan social media copywriter profesional">${esc(data.role)}</textarea>
+              <textarea id="editRole" class="form-textarea" rows="2" placeholder="Kamu adalah viral content strategist dan social media copywriter profesional">${esc(data.role)}</textarea>
               <label>Target Audiens</label>
-              <textarea id="editTargetAudience" rows="2" placeholder="Usia 18–35, suka belanja online, suka promo, pemula">${esc(data.targetAudience)}</textarea>
+              <textarea id="editTargetAudience" class="form-textarea" rows="2" placeholder="Usia 18–35, suka belanja online, suka promo, pemula">${esc(data.targetAudience)}</textarea>
             </div>
           </details>
           <details class="preset-section">
             <summary style="cursor:pointer;font-weight:600;padding:6px 0">✍️ Section 3: Style & Emotion</summary>
             <div style="padding:8px 0 0 12px;display:flex;flex-direction:column;gap:8px">
               <label>Gaya / Tone</label>
-              <input id="editTone" placeholder="Santai, persuasif, relatable, urgency ringan" value="${esc(data.tone)}" />
+              <input id="editTone" class="form-input" placeholder="Santai, persuasif, relatable, urgency ringan" value="${esc(data.tone)}" />
               <label>Aturan Bahasa (Language Rules)</label>
-              <textarea id="editLanguageRules" rows="2" placeholder="Bahasa Indonesia santai, kalimat pendek, maksimal 2 emoji, tidak formal">${esc(data.languageRules)}</textarea>
+              <textarea id="editLanguageRules" class="form-textarea" rows="2" placeholder="Bahasa Indonesia santai, kalimat pendek, maksimal 2 emoji, tidak formal">${esc(data.languageRules)}</textarea>
               <label>Emosi Target (Emotion Trigger)</label>
-              <div style="display:flex;flex-wrap:wrap;gap:8px">
-                <label><input type="checkbox" name="editEmotion" value="Penasaran" ${emotionArr.includes('Penasaran')?'checked':''} /> Penasaran</label>
-                <label><input type="checkbox" name="editEmotion" value="Takut ketinggalan" ${emotionArr.includes('Takut ketinggalan')?'checked':''} /> Takut ketinggalan</label>
-                <label><input type="checkbox" name="editEmotion" value="Senang" ${emotionArr.includes('Senang')?'checked':''} /> Senang</label>
-                <label><input type="checkbox" name="editEmotion" value="Termotivasi" ${emotionArr.includes('Termotivasi')?'checked':''} /> Termotivasi</label>
-                <label><input type="checkbox" name="editEmotion" value="Ingin beli" ${emotionArr.includes('Ingin beli')?'checked':''} /> Ingin beli</label>
-              </div>
+              <textarea id="editEmotion" class="form-textarea" rows="3" placeholder="Contoh: Penasaran, Takut ketinggalan, Senang, Termotivasi, Ingin beli atau Gabungan emosi yang membuat viewer tertarik...">${esc(Array.isArray(data.emotionTrigger) ? data.emotionTrigger.join(', ') : (data.emotionTrigger || ''))}</textarea>
             </div>
           </details>
           <details class="preset-section">
             <summary style="cursor:pointer;font-weight:600;padding:6px 0">🧱 Section 4: Structure & Format</summary>
             <div style="padding:8px 0 0 12px;display:flex;flex-direction:column;gap:8px">
               <label>Struktur Output</label>
-              <input id="editStructure" placeholder="Hook → Problem → Benefit → Proof → Question → CTA" value="${esc(data.structure)}" />
+              <input id="editStructure" class="form-input" placeholder="Hook → Problem → Benefit → Proof → Question → CTA" value="${esc(data.structure)}" />
               <label>Hook Style</label>
-              <select id="editHookStyle">
-                <option value="">—</option>
-                <option value="Pertanyaan" ${(data.hookStyle||'')==='Pertanyaan'?'selected':''}>Pertanyaan</option>
-                <option value="Fakta mengejutkan" ${(data.hookStyle||'')==='Fakta mengejutkan'?'selected':''}>Fakta mengejutkan</option>
-                <option value="Rahasia" ${(data.hookStyle||'')==='Rahasia'?'selected':''}>Rahasia</option>
-                <option value="Larangan" ${(data.hookStyle||'')==='Larangan'?'selected':''}>Larangan</option>
-                <option value="Cerita singkat" ${(data.hookStyle||'')==='Cerita singkat'?'selected':''}>Cerita singkat</option>
-              </select>
+              <textarea id="editHookStyle" class="form-textarea" rows="2" placeholder="Contoh: Pertanyaan, Fakta mengejutkan, Rahasia, Larangan, Cerita singkat atau Hook style custom kamu...">${esc(data.hookStyle || '')}</textarea>
               <label>Format Output</label>
-              <select id="editFormatOutput">
+              <select id="editFormatOutput" class="form-select">
                 <option value="">—</option>
                 <option value="Per baris sesuai struktur" ${(data.formatOutput||'')==='Per baris sesuai struktur'?'selected':''}>Per baris sesuai struktur</option>
                 <option value="1 paragraf" ${(data.formatOutput||'')==='1 paragraf'?'selected':''}>1 paragraf</option>
                 <option value="2 paragraf" ${(data.formatOutput||'')==='2 paragraf'?'selected':''}>2 paragraf</option>
               </select>
               <label>Panjang Konten</label>
-              <select id="editLength">
+              <select id="editLength" class="form-select">
                 <option value="3–4 kalimat" ${(data.length||'')==='3–4 kalimat'?'selected':''}>3–4 kalimat</option>
                 <option value="4–6 kalimat" ${(data.length||'')==='4–6 kalimat'?'selected':''}>4–6 kalimat</option>
                 <option value="6–8 kalimat" ${(data.length||'')==='6–8 kalimat'?'selected':''}>6–8 kalimat</option>
@@ -1095,60 +1630,44 @@ function mountAIGeneratorMain(){
             <summary style="cursor:pointer;font-weight:600;padding:6px 0">🔍 Section 5: SEO & Discovery</summary>
             <div style="padding:8px 0 0 12px;display:flex;flex-direction:column;gap:8px">
               <label>Keyword Utama (SEO Focus)</label>
-              <input id="editKeywordMain" placeholder="skincare murah" value="${esc(data.keywordMain)}" />
+              <input id="editKeywordMain" class="form-input" placeholder="skincare murah" value="${esc(data.keywordMain)}" />
               <label>Keyword Tambahan (comma separated)</label>
-              <input id="editKeywordExtra" placeholder="glowing, wajah bersih, aman" value="${esc(data.keywordExtra)}" />
+              <input id="editKeywordExtra" class="form-input" placeholder="glowing, wajah bersih, aman" value="${esc(data.keywordExtra)}" />
               <label>Hashtag Strategy</label>
-              <select id="editHashtagStrategy">
-                <option value="">—</option>
-                <option value="Niche + keyword" ${(data.hashtagStrategy||'')==='Niche + keyword'?'selected':''}>Niche + keyword</option>
-                <option value="Keyword + trending" ${(data.hashtagStrategy||'')==='Keyword + trending'?'selected':''}>Keyword + trending</option>
-                <option value="Campuran" ${(data.hashtagStrategy||'')==='Campuran'?'selected':''}>Campuran</option>
-              </select>
+              <textarea id="editHashtagStrategy" class="form-textarea" rows="2" placeholder="Contoh: Niche + keyword, Keyword + trending, Campuran atau strategi hashtag custom kamu...">${esc(data.hashtagStrategy || '')}</textarea>
               <label>Jumlah Hashtag</label>
-              <input type="number" id="editHashtagCount" min="1" max="30" value="${data.hashtagCount != null ? data.hashtagCount : 10}" style="max-width:80px" />
+              <input type="number" id="editHashtagCount" class="form-input" min="1" max="30" value="${data.hashtagCount != null ? data.hashtagCount : 10}" style="max-width:80px" />
             </div>
           </details>
           <details class="preset-section">
             <summary style="cursor:pointer;font-weight:600;padding:6px 0">📢 Section 6: Engagement & Conversion</summary>
             <div style="padding:8px 0 0 12px;display:flex;flex-direction:column;gap:8px">
               <label>CTA Utama (Penjualan)</label>
-              <input id="editCtaMain" placeholder="Klik keranjang sekarang" value="${esc(data.ctaMain || data.cta)}" />
+              <input id="editCtaMain" class="form-input" placeholder="Klik keranjang sekarang" value="${esc(data.ctaMain || data.cta)}" />
               <label>Link/CTA Affiliate (opsional)</label>
-              <input id="editCtaAffiliate" placeholder="Link di bio / Klik link" value="${esc(data.ctaAffiliate || '')}" />
+              <input id="editCtaAffiliate" class="form-input" placeholder="Link di bio / Klik link" value="${esc(data.ctaAffiliate || '')}" />
               <label>CTA Engagement</label>
-              <div style="display:flex;flex-wrap:wrap;gap:8px">
-                <label><input type="checkbox" name="editCtaEngagement" value="Comment" ${ctaEngArr.includes('Comment')?'checked':''} /> Comment</label>
-                <label><input type="checkbox" name="editCtaEngagement" value="Save" ${ctaEngArr.includes('Save')?'checked':''} /> Save</label>
-                <label><input type="checkbox" name="editCtaEngagement" value="Share" ${ctaEngArr.includes('Share')?'checked':''} /> Share</label>
-                <label><input type="checkbox" name="editCtaEngagement" value="Follow" ${ctaEngArr.includes('Follow')?'checked':''} /> Follow</label>
-              </div>
+              <textarea id="editCtaEngagement" class="form-textarea" rows="2" placeholder="Contoh: Comment, Save, Share, Follow atau kombinasi engagement yang diinginkan...">${esc(Array.isArray(data.ctaEngagement) ? data.ctaEngagement.join(', ') : (data.ctaEngagement || ''))}</textarea>
               <label>Engagement Goal</label>
-              <select id="editEngagementGoal">
-                <option value="">—</option>
-                <option value="Komentar" ${(data.engagementGoal||'')==='Komentar'?'selected':''}>Komentar</option>
-                <option value="Save" ${(data.engagementGoal||'')==='Save'?'selected':''}>Save</option>
-                <option value="Share" ${(data.engagementGoal||'')==='Share'?'selected':''}>Share</option>
-                <option value="Kombinasi" ${(data.engagementGoal||'')==='Kombinasi'?'selected':''}>Kombinasi</option>
-              </select>
+              <textarea id="editEngagementGoal" class="form-textarea" rows="2" placeholder="Contoh: Komentar, Save, Share, Kombinasi atau engagement goal prioritas kamu...">${esc(data.engagementGoal || '')}</textarea>
             </div>
           </details>
           <details class="preset-section">
             <summary style="cursor:pointer;font-weight:600;padding:6px 0">🚫 Section 7: Control & Quality</summary>
             <div style="padding:8px 0 0 12px;display:flex;flex-direction:column;gap:8px">
               <label>Larangan (Negative Rules)</label>
-              <textarea id="editNegativeRules" rows="2" placeholder="Jangan menyebut AI, jangan bahasa formal, jangan terlalu panjang">${esc(data.negativeRules)}</textarea>
+              <textarea id="editNegativeRules" class="form-textarea" rows="2" placeholder="Jangan menyebut AI, jangan bahasa formal, jangan terlalu panjang">${esc(data.negativeRules)}</textarea>
               <label>Batas Kalimat / Karakter (Maks kata)</label>
-              <input type="number" id="editMaxWords" min="1" max="500" value="${data.maxWords != null ? data.maxWords : 120}" style="max-width:80px" />
+              <input type="number" id="editMaxWords" class="form-input" min="1" max="500" value="${data.maxWords != null ? data.maxWords : 120}" style="max-width:80px" />
               <label>Forbidden Words (opsional)</label>
-              <input id="editForbiddenWords" placeholder="gratis palsu, clickbait" value="${esc(data.forbiddenWords)}" />
+              <input id="editForbiddenWords" class="form-input" placeholder="gratis palsu, clickbait" value="${esc(data.forbiddenWords)}" />
             </div>
           </details>
           <details class="preset-section">
             <summary style="cursor:pointer;font-weight:600;padding:6px 0">🔁 Section 8: Productivity</summary>
             <div style="padding:8px 0 0 12px;display:flex;flex-direction:column;gap:8px">
               <label>Jumlah Variasi Output</label>
-              <input type="number" id="editVariationCount" min="1" max="10" value="${data.variationCount != null ? data.variationCount : 3}" style="max-width:80px" />
+              <input type="number" id="editVariationCount" class="form-input" min="1" max="10" value="${data.variationCount != null ? data.variationCount : 3}" style="max-width:80px" />
               <label><input type="checkbox" id="editConsistencyRule" ${data.consistencyRule?'checked':''} /> Aktifkan preset ini untuk semua output sampai diganti</label>
             </div>
           </details>
@@ -1156,41 +1675,71 @@ function mountAIGeneratorMain(){
             <summary style="cursor:pointer;font-weight:600;padding:6px 0">🧪 Section 9: Advanced (Optional)</summary>
             <div style="padding:8px 0 0 12px;display:flex;flex-direction:column;gap:8px">
               <label>Example Output (Few-shot)</label>
-              <textarea id="editExampleOutput" rows="3" placeholder="Contoh caption ideal...">${esc(data.exampleOutput)}</textarea>
+              <textarea id="editExampleOutput" class="form-textarea" rows="3" placeholder="Contoh caption ideal...">${esc(data.exampleOutput)}</textarea>
               <label>Trending Context</label>
-              <input id="editTrendingContext" placeholder="Tren skincare 2026" value="${esc(data.trendingContext)}" />
+              <input id="editTrendingContext" class="form-input" placeholder="Tren skincare 2026" value="${esc(data.trendingContext)}" />
               <label>Keyword Priority Order</label>
-              <input id="editKeywordPriorityOrder" placeholder="Keyword 1 → Keyword 2 → Keyword 3" value="${esc(data.keywordPriorityOrder)}" />
+              <input id="editKeywordPriorityOrder" class="form-input" placeholder="Keyword 1 → Keyword 2 → Keyword 3" value="${esc(data.keywordPriorityOrder)}" />
+            </div>
+          </details>
+          <details class="preset-section">
+            <summary style="cursor:pointer;font-weight:600;padding:6px 0">🎵 Section 10: Audio & Music (Optional)</summary>
+            <div style="padding:8px 0 0 12px;display:flex;flex-direction:column;gap:8px">
+              <label>Audio Style</label>
+              <textarea id="editAudioStyle" class="form-textarea" rows="2" placeholder="Deskripsi gaya audio: e.g., Soft background music, calming, focuses on content. Music should support reading rhythm, not compete with content.">${esc(data.audioStyle)}</textarea>
+              <label>Music Mood</label>
+              <textarea id="editMusicMood" class="form-textarea" rows="2" placeholder="Contoh: energetic, motivational, relaxing, exciting">${esc(data.musicMood)}</textarea>
+              <label>Audio Genre Recommendation</label>
+              <input id="editAudioGenre" class="form-input" placeholder="Contoh: pop, electronic, lofi, classical, jazz, hiphop, ambient" value="${esc(data.audioGenre)}" />
+              <label>Music Suggestion Details</label>
+              <textarea id="editMusicSuggestion" class="form-textarea" rows="3" placeholder="Deskripsi musik yang cocok untuk konten ini...">${esc(data.musicSuggestion)}</textarea>
+              <label>Recommended Audio Length untuk Video</label>
+              <select id="editAudioLength" class="form-select" style="max-width:200px">
+                <option value="">— Flexible —</option>
+                <option value="15s" ${data.audioLength==='15s'?'selected':''}>15 detik</option>
+                <option value="30s" ${data.audioLength==='30s'?'selected':''}>30 detik</option>
+                <option value="60s" ${data.audioLength==='60s'?'selected':''}>60 detik</option>
+                <option value="15s-30s" ${data.audioLength==='15s-30s'?'selected':''}>15-30 detik</option>
+                <option value="flexible" ${data.audioLength==='flexible'?'selected':''}>Flexible</option>
+              </select>
             </div>
           </details>
         </div>
       `
-      const listEl = document.getElementById('presetsList')
-      listEl.insertAdjacentElement('afterbegin', modal)
+      // create overlay so modal floats above the grid
+      const overlay = document.createElement('div')
+      overlay.className = 'preset-editor-overlay'
+      overlay.style.cssText = 'position:fixed;inset:0;display:flex;align-items:flex-start;justify-content:center;z-index:9999;overflow:auto;'
+      modal.style.maxWidth = '920px'
+      modal.style.width = '100%'
+      modal.style.boxSizing = 'border-box'
+      modal.style.padding = '16px'
+      overlay.appendChild(modal)
+      document.body.appendChild(overlay)
 
       function readForm(){
         return {
           label: getEditVal('editLabel') || key,
           platform: getEditVal('editPlatform') || 'tiktok',
-          goal: getEditChecks('editGoal'),
+          goal: String(document.getElementById('editGoal')?.value || '').trim().split(',').map(s=>s.trim()).filter(Boolean),
           role: getEditVal('editRole'),
           targetAudience: getEditVal('editTargetAudience'),
           tone: getEditVal('editTone'),
           languageRules: getEditVal('editLanguageRules'),
-          emotionTrigger: getEditChecks('editEmotion'),
+          emotionTrigger: String(document.getElementById('editEmotion')?.value || '').trim().split(',').map(s=>s.trim()).filter(Boolean),
           structure: getEditVal('editStructure'),
-          hookStyle: getEditVal('editHookStyle'),
+          hookStyle: String(document.getElementById('editHookStyle')?.value || '').trim(),
           formatOutput: getEditVal('editFormatOutput'),
           length: getEditVal('editLength'),
           keywordMain: getEditVal('editKeywordMain'),
           keywordExtra: getEditVal('editKeywordExtra'),
-          hashtagStrategy: getEditVal('editHashtagStrategy'),
+          hashtagStrategy: String(document.getElementById('editHashtagStrategy')?.value || '').trim(),
           hashtagCount: getEditNum('editHashtagCount', 10),
           ctaMain: getEditVal('editCtaMain'),
           cta: getEditVal('editCtaMain'),
           ctaAffiliate: getEditVal('editCtaAffiliate'),
-          ctaEngagement: getEditChecks('editCtaEngagement'),
-          engagementGoal: getEditVal('editEngagementGoal'),
+          ctaEngagement: String(document.getElementById('editCtaEngagement')?.value || '').trim().split(',').map(s=>s.trim()).filter(Boolean),
+          engagementGoal: String(document.getElementById('editEngagementGoal')?.value || '').trim(),
           negativeRules: getEditVal('editNegativeRules'),
           maxWords: getEditNum('editMaxWords', 120),
           forbiddenWords: getEditVal('editForbiddenWords'),
@@ -1198,7 +1747,12 @@ function mountAIGeneratorMain(){
           consistencyRule: !!document.getElementById('editConsistencyRule')?.checked,
           exampleOutput: getEditVal('editExampleOutput'),
           trendingContext: getEditVal('editTrendingContext'),
-          keywordPriorityOrder: getEditVal('editKeywordPriorityOrder')
+          keywordPriorityOrder: getEditVal('editKeywordPriorityOrder'),
+          audioStyle: getEditVal('editAudioStyle'),
+          musicMood: getEditVal('editMusicMood'),
+          audioGenre: getEditVal('editAudioGenre'),
+          musicSuggestion: getEditVal('editMusicSuggestion'),
+          audioLength: getEditVal('editAudioLength')
         }
       }
 
@@ -1208,12 +1762,12 @@ function mountAIGeneratorMain(){
           if(!t) return
           document.getElementById('editLabel').value = t.label || ''
           document.getElementById('editPlatform').value = t.platform || 'tiktok'
-          document.querySelectorAll('input[name="editGoal"]').forEach(el=>{ el.checked = (t.goal||[]).includes(el.value) })
+          document.getElementById('editGoal').value = (Array.isArray(t.goal) ? t.goal.join(', ') : (t.goal || ''))
           document.getElementById('editRole').value = t.role || ''
           document.getElementById('editTargetAudience').value = t.targetAudience || ''
           document.getElementById('editTone').value = t.tone || ''
           document.getElementById('editLanguageRules').value = t.languageRules || ''
-          document.querySelectorAll('input[name="editEmotion"]').forEach(el=>{ el.checked = (t.emotionTrigger||[]).includes(el.value) })
+          document.getElementById('editEmotion').value = (Array.isArray(t.emotionTrigger) ? t.emotionTrigger.join(', ') : (t.emotionTrigger || ''))
           document.getElementById('editStructure').value = t.structure || ''
           document.getElementById('editHookStyle').value = t.hookStyle || ''
           document.getElementById('editFormatOutput').value = t.formatOutput || ''
@@ -1224,7 +1778,7 @@ function mountAIGeneratorMain(){
           document.getElementById('editHashtagCount').value = t.hashtagCount != null ? t.hashtagCount : 10
           document.getElementById('editCtaMain').value = t.ctaMain || t.cta || ''
           document.getElementById('editCtaAffiliate').value = t.ctaAffiliate || ''
-          document.querySelectorAll('input[name="editCtaEngagement"]').forEach(el=>{ el.checked = (t.ctaEngagement||[]).includes(el.value) })
+          document.getElementById('editCtaEngagement').value = (Array.isArray(t.ctaEngagement) ? t.ctaEngagement.join(', ') : (t.ctaEngagement || ''))
           document.getElementById('editEngagementGoal').value = t.engagementGoal || ''
           document.getElementById('editNegativeRules').value = t.negativeRules || ''
           document.getElementById('editMaxWords').value = t.maxWords != null ? t.maxWords : 120
@@ -1237,24 +1791,209 @@ function mountAIGeneratorMain(){
         })
       })
 
-      document.getElementById('cancelPresetEd').addEventListener('click', ()=>{ modal.remove(); renderList() })
-      document.getElementById('savePresetEd').addEventListener('click', ()=>{
+      document.getElementById('cancelPresetEd').addEventListener('click', ()=>{ try{ overlay.remove() }catch(e){}; applyFilters() })
+      document.getElementById('savePresetEd').addEventListener('click', async ()=>{
         window.PresetsManager.upsert(key, readForm())
-        modal.remove()
-        renderList()
+        // Auto-sync to backend after save
+        try{
+          const backend = getBackendURL()
+          const token = localStorage.getItem('auth_token')
+          if(backend && token){
+            const data = window.PresetsManager.getStorage()
+            await fetch(backend + '/presets', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+              body: JSON.stringify(data)
+            }).then(r=>{
+              if(r.ok) aiLog('info','preset.saved',{ key, backend })
+              else aiLog('warn','preset.save.failed',{ key, status: r.status })
+            })
+          }
+        }catch(e){ aiLog('error','preset.sync.error',{ error: String(e) }) }
+        try{ overlay.remove() }catch(e){}
+        applyFilters()
         updatePresetDropdown()
       })
     }
 
-    renderList()
+    // Search & Filter functionality
+    const applyFilters = () => {
+      const allPresets = (window.PresetsManager && typeof window.PresetsManager.list === 'function') ? window.PresetsManager.list() : []
+      const searchTerm = String(document.getElementById('presetSearchInput')?.value || '').toLowerCase().trim()
+      const platformFilterRaw = String(document.getElementById('presetFilterPlatform')?.value || '').toLowerCase().trim()
+      const goalFilterRaw = String(document.getElementById('presetFilterGoal')?.value || '').toLowerCase().trim()
+      
+      const listEl = document.getElementById('presetsList')
+      if(!listEl) return
+      
+      const normalize = s => String(s||'').toLowerCase().trim().replace(/[\-_\s]+/g,' ')
 
-    document.getElementById('createPresetBtn').addEventListener('click', ()=>{
+      const filtered = allPresets.filter(item => {
+        // `item` from PresetsManager.list() only contains summary fields (key, label, builtin).
+        // Retrieve the full preset object for detailed fields used in filtering.
+        const full = (window.PresetsManager && typeof window.PresetsManager.get === 'function') ? (window.PresetsManager.get(item.key) || {}) : {}
+
+        const label = normalize(item.label || full.label || item.key)
+        const platform = normalize(full.platform)
+        const goalsArr = Array.isArray(full.goal) ? full.goal.map(g=> normalize(g)) : (full.goal ? [normalize(full.goal)] : [])
+        const goals = goalsArr.join(' ')
+        const description = normalize(full.description || '')
+
+        const matchSearch = !searchTerm || label.includes(searchTerm) || platform.includes(searchTerm) || goals.includes(searchTerm) || description.includes(searchTerm)
+        const matchPlatform = !platformFilterRaw || (platform && platform.indexOf(platformFilterRaw) !== -1)
+        const matchGoal = !goalFilterRaw || goalsArr.some(g => g.indexOf(goalFilterRaw) !== -1)
+
+        return matchSearch && matchPlatform && matchGoal
+      })
+      
+      // Update stats
+      try{
+        document.getElementById('presetCountShowing').textContent = filtered.length
+        document.getElementById('presetCountTotal').textContent = allPresets.length
+      }catch(e){}
+      
+      // Re-render list with filtered items
+      listEl.innerHTML = ''
+      if(filtered.length === 0){
+        const emptyMsg = document.createElement('div')
+        emptyMsg.style.padding = '20px'
+        emptyMsg.style.textAlign = 'center'
+        emptyMsg.style.color = '#888'
+        emptyMsg.textContent = 'Tidak ada preset yang cocok dengan filter'
+        listEl.appendChild(emptyMsg)
+        return
+      }
+      
+      const storage = (window.PresetsManager && typeof window.PresetsManager.getStorage === 'function') ? window.PresetsManager.getStorage() : { userPresets: {} }
+      filtered.forEach(it=>{
+        const el = document.createElement('div')
+        el.style.display = 'flex'
+        el.style.justifyContent = 'space-between'
+        el.style.alignItems = 'center'
+        el.style.gap = '8px'
+        el.style.padding = '10px'
+        el.style.borderRadius = '8px'
+        el.style.background = 'rgba(255,255,255,0.02)'
+        el.style.border = '1px solid rgba(255,255,255,0.04)'
+
+        const left = document.createElement('div')
+        left.style.display = 'flex'
+        left.style.alignItems = 'center'
+        left.style.gap = '10px'
+
+        if(!it.builtin){
+          const synced = storage.userPresets && storage.userPresets[it.key] && storage.userPresets[it.key]._serverSynced
+          const dot = document.createElement('span')
+          dot.style.width = '12px'
+          dot.style.height = '12px'
+          dot.style.borderRadius = '50%'
+          dot.style.display = 'inline-block'
+          dot.title = synced ? 'Tersinkron ke server' : 'Belum tersinkron (lokal)'
+          dot.style.background = synced ? '#26a54a' : '#e09b2d'
+          dot.style.flex = '0 0 auto'
+          left.appendChild(dot)
+        }
+
+        const textWrap = document.createElement('div')
+        textWrap.style.display = 'flex'
+        textWrap.style.flexDirection = 'column'
+        textWrap.style.gap = '4px'
+        const title = document.createElement('div')
+        title.style.fontWeight = '600'
+        title.textContent = it.label
+        const subtitle = document.createElement('div')
+        subtitle.style.fontSize = '12px'
+        subtitle.style.color = '#aaa'
+        if(it.builtin) subtitle.textContent = 'Template • Built-in'
+        else {
+          const p = (storage.userPresets && storage.userPresets[it.key] && storage.userPresets[it.key].platform) ? storage.userPresets[it.key].platform : ''
+          subtitle.textContent = p ? `User preset • ${p}` : 'User preset'
+        }
+        textWrap.appendChild(title)
+        textWrap.appendChild(subtitle)
+        left.appendChild(textWrap)
+
+        const actions = document.createElement('div')
+        actions.style.display = 'flex'
+        actions.style.gap = '8px'
+        
+        const editBtn = document.createElement('button')
+        editBtn.className = 'small'
+        editBtn.setAttribute('data-action','edit')
+        editBtn.setAttribute('data-preset',it.key)
+        editBtn.innerHTML = '✏️'
+        
+        const dlBtn = document.createElement('button')
+        dlBtn.className = 'small'
+        dlBtn.setAttribute('data-action','download')
+        dlBtn.setAttribute('data-preset',it.key)
+        dlBtn.innerHTML = '⬇️'
+        
+        const delBtn = document.createElement('button')
+        delBtn.className = 'small'
+        delBtn.setAttribute('data-action','delete')
+        delBtn.setAttribute('data-preset',it.key)
+        delBtn.innerHTML = '🗑️'
+        
+        actions.appendChild(editBtn)
+        actions.appendChild(dlBtn)
+        actions.appendChild(delBtn)
+        el.appendChild(left)
+        el.appendChild(actions)
+        listEl.appendChild(el)
+      })
+    }
+    
+    // Attach filter listeners
+    const searchInput = document.getElementById('presetSearchInput')
+    const platformSelect = document.getElementById('presetFilterPlatform')
+    const goalSelect = document.getElementById('presetFilterGoal')
+    const resetBtn = document.getElementById('presetResetFilterBtn')
+    
+    if(searchInput) searchInput.addEventListener('input', applyFilters)
+    if(platformSelect) platformSelect.addEventListener('change', applyFilters)
+    if(goalSelect) goalSelect.addEventListener('change', applyFilters)
+    if(resetBtn) resetBtn.addEventListener('click', ()=>{
+      if(searchInput) searchInput.value = ''
+      if(platformSelect) platformSelect.value = ''
+      if(goalSelect) goalSelect.value = ''
+      applyFilters()
+      searchInput?.focus()
+    })
+    
+    // Initial call to apply filters
+    applyFilters()
+
+    document.getElementById('createPresetBtn').addEventListener('click', async ()=>{
       const name = String(document.getElementById('newPresetName').value||'').trim()
       if(!name){ showToast('Masukkan nama preset', 'error'); return }
       if(window.PresetsManager.get(name)){ showToast('Preset sudah ada', 'error'); return }
       window.PresetsManager.upsert(name, Object.assign(window.PresetsManager.getDefaultPreset(), { label: name }))
+      // Auto-sync to backend after create
+      try{
+        const backend = getBackendURL()
+        const token = localStorage.getItem('auth_token')
+        if(backend && token){
+          const data = window.PresetsManager.getStorage()
+          await fetch(backend + '/presets', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+            body: JSON.stringify(data)
+          }).then(r=>{
+            if(r.ok){
+              aiLog('info','preset.created',{ name, backend })
+              showToast('Preset dibuat & tersinkron', 'success')
+            }else{
+              aiLog('warn','preset.create.sync.failed',{ name, status: r.status })
+              showToast('Preset dibuat tapi gagal sinkron ke server', 'warn')
+            }
+          })
+        }else if(!token){
+          showToast('Preset dibuat lokal (belum login)', 'info')
+        }
+      }catch(e){ aiLog('error','preset.create.sync.error',{ error: String(e) }) }
       document.getElementById('newPresetName').value = ''
-      renderList()
+      applyFilters()
       updatePresetDropdown()
     })
 
@@ -1265,9 +2004,57 @@ function mountAIGeneratorMain(){
       const action = btn.getAttribute('data-action')
       const key = btn.getAttribute('data-preset')
       if(action === 'edit'){
+        // Close any existing overlay/modal before opening new one
+        const existingOverlay = document.querySelector('.preset-editor-overlay')
+        if(existingOverlay) existingOverlay.remove()
         openEditor(key)
+      }else if(action === 'download'){
+        // Download single preset as JSON file
+        try{
+          const preset = window.PresetsManager.get(key)
+          if(!preset){
+            showToast('Preset tidak ditemukan', 'error')
+            return
+          }
+          const filename = preset.label ? preset.label.replace(/[^a-z0-9]/gi,'_').toLowerCase() : key
+          const json = JSON.stringify(preset, null, 2)
+          const blob = new Blob([json], { type: 'application/json' })
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = `preset_${filename}.json`
+          document.body.appendChild(a)
+          a.click()
+          a.remove()
+          URL.revokeObjectURL(url)
+          showToast(`Preset "${preset.label}" downloaded`, 'success')
+        }catch(e){
+          console.warn('[presets.download] error:', e)
+          showToast('Gagal download preset', 'error')
+        }
       }else if(action === 'delete'){
-        if(confirm('Hapus preset "'+key+'"?')){ window.PresetsManager.remove(key); renderList(); updatePresetDropdown() }
+        // Gunakan deleteWithConfirm jika ada, dengan fallback ke showDeleteConfirm atau confirm native
+        (async ()=>{
+          try{
+            let confirmed = false
+            if(window.PresetsManager && typeof window.PresetsManager.deleteWithConfirm === 'function'){
+              confirmed = await window.PresetsManager.deleteWithConfirm(key)
+            } else if(typeof window.showDeleteConfirm === 'function'){
+              confirmed = await window.showDeleteConfirm(key)
+            } else {
+              confirmed = confirm('Hapus preset "'+key+'"?')
+            }
+            if(!confirmed) return
+            // Jalankan hapus ke localStorage dan backend
+            try{ await window.PresetsManager.remove(key) }catch(e){ /* best-effort */ }
+            applyFilters()
+            updatePresetDropdown()
+            showToast('Preset "'+key+'" dihapus', 'success')
+          }catch(e){
+            console.warn('[presets.delete] error:', e)
+            showToast('Gagal menghapus preset', 'error')
+          }
+        })()
       }
     })
 
@@ -1301,7 +2088,7 @@ function mountAIGeneratorMain(){
             const data = typeof raw === 'string' ? JSON.parse(raw) : raw
             const result = window.PresetsManager.importBackup(data)
             if (result.success) {
-              renderList()
+              applyFilters()
               updatePresetDropdown()
               showToast('Backup di-import. ' + (result.mergedCount ? result.mergedCount + ' preset digabung.' : ''), 'success')
             } else {
@@ -1410,10 +2197,327 @@ function mountAIGeneratorMain(){
     const sel = document.getElementById('aiPresetSelect')
     if(!sel) return
     const cur = sel.value || ''
-    sel.innerHTML = '<option value="">(Manual - no preset)</option>'
-    const items = window.PresetsManager.list()
-    items.forEach(it=>{ const o = document.createElement('option'); o.value = it.key; o.textContent = it.label; sel.appendChild(o) })
-    if(cur) sel.value = cur
+
+    // Ensure filter controls exist (search + platform + goal)
+    if(!document.getElementById('presetDropdownControls')){
+      const ctrl = document.createElement('div')
+      ctrl.id = 'presetDropdownControls'
+      ctrl.style.display = 'flex'
+      ctrl.style.gap = '8px'
+      ctrl.style.alignItems = 'center'
+      ctrl.style.marginBottom = '6px'
+
+      const input = document.createElement('input')
+      input.id = 'presetDropdownSearch'
+      input.type = 'search'
+      input.placeholder = '🔍 Cari preset...'
+      input.className = 'form-input'
+      input.style.flex = '1'
+
+      const plat = document.createElement('select')
+      plat.id = 'presetDropdownPlatform'
+      plat.className = 'form-select'
+      plat.style.minWidth = '140px'
+      plat.style.minHeight = '35px'
+      plat.style.height = '35px'
+      plat.style.padding = '2px 8px'
+
+      const goal = document.createElement('select')
+      goal.id = 'presetDropdownGoal'
+      goal.className = 'form-select'
+      goal.style.minWidth = '140px'
+      goal.style.minHeight = '35px'
+      goal.style.height = '35px'
+      goal.style.padding = '2px 8px'
+
+      const reset = document.createElement('button')
+      reset.type = 'button'
+      reset.id = 'presetDropdownReset'
+      reset.className = 'secondary'
+      reset.textContent = 'Reset'
+      reset.style.minHeight = '35px'
+      reset.style.height = '35px'
+      reset.style.padding = '2px 8px'
+
+      // place input outside of the controls container so it can live separately
+      // (we'll insert both input and ctrl into the DOM as siblings before the native select)
+      ctrl.appendChild(plat)
+      ctrl.appendChild(goal)
+      ctrl.appendChild(reset)
+
+      // insert the standalone search input and the controls container before the native select
+      try{ sel.parentNode.insertBefore(input, sel) }catch(e){}
+      try{ sel.parentNode.insertBefore(ctrl, sel) }catch(e){}
+
+      const apply = () => {
+        // rebuild options according to controls
+        const q = String(document.getElementById('presetDropdownSearch')?.value || '').toLowerCase().trim()
+        const pf = String(document.getElementById('presetDropdownPlatform')?.value || '').toLowerCase().trim()
+        const gf = String(document.getElementById('presetDropdownGoal')?.value || '').toLowerCase().trim()
+        // repopulate
+        sel.innerHTML = '<option value="">(Manual - no preset)</option>'
+        const items = window.PresetsManager.list() || []
+        const normalize = s => String(s||'').toLowerCase().trim().replace(/[\-\_\s]+/g,' ')
+        items.forEach(it=>{
+          const full = (window.PresetsManager && typeof window.PresetsManager.get === 'function') ? (window.PresetsManager.get(it.key) || {}) : {}
+          const label = normalize(it.label || full.label || it.key)
+          const platform = normalize(full.platform)
+          const goalsArr = Array.isArray(full.goal) ? full.goal.map(g=> normalize(g)) : (full.goal ? [normalize(full.goal)] : [])
+          const goals = goalsArr.join(' ')
+          const description = normalize(full.description || '')
+          const matchQ = !q || label.includes(q) || platform.includes(q) || goals.includes(q) || description.includes(q)
+          const matchP = !pf || (platform && platform.indexOf(pf) !== -1)
+          const matchG = !gf || goalsArr.some(g => g.indexOf(gf) !== -1)
+          if(matchQ && matchP && matchG){ const o = document.createElement('option'); o.value = it.key; o.textContent = it.label; sel.appendChild(o) }
+        })
+        try{ if(cur && Array.from(sel.options).some(o=>o.value===cur)) sel.value = cur }catch(e){}
+      }
+
+      input.addEventListener('input', apply)
+      plat.addEventListener('change', apply)
+      goal.addEventListener('change', apply)
+      reset.addEventListener('click', ()=>{ document.getElementById('presetDropdownSearch').value=''; document.getElementById('presetDropdownPlatform').value=''; document.getElementById('presetDropdownGoal').value=''; apply() })
+    }
+
+    // populate platform/goal option lists based on current presets
+    const selPlat = document.getElementById('presetDropdownPlatform')
+    const selGoal = document.getElementById('presetDropdownGoal')
+    if(selPlat && selGoal){
+      // collect unique platforms/goals
+      const all = window.PresetsManager.list() || []
+      const normalize = s => String(s||'').toLowerCase().trim().replace(/[\-\_\s]+/g,' ')
+      const platforms = new Set()
+      const goals = new Set()
+      all.forEach(it=>{
+        const full = (window.PresetsManager && typeof window.PresetsManager.get === 'function') ? (window.PresetsManager.get(it.key) || {}) : {}
+        if(full.platform) platforms.add(String(full.platform).trim())
+        const ga = Array.isArray(full.goal) ? full.goal : (full.goal ? String(full.goal).split(',').map(s=>s.trim()).filter(Boolean) : [])
+        ga.forEach(g => { if(g) goals.add(String(g).trim()) })
+      })
+      // rebuild select options
+      const buildOptions = (selEl, itemsSet) => {
+        const curv = selEl.value || ''
+        selEl.innerHTML = '<option value="">(Semua)</option>'
+        Array.from(itemsSet).sort().forEach(v=>{ const o = document.createElement('option'); o.value = String(v).toLowerCase().trim(); o.textContent = v; selEl.appendChild(o) })
+        try{ if(curv) selEl.value = curv }catch(e){}
+      }
+      buildOptions(selPlat, platforms)
+      buildOptions(selGoal, goals)
+    }
+
+    // initial populate using controls' current state
+    document.getElementById('presetDropdownSearch')?.dispatchEvent(new Event('input'))
+
+    // Create a custom dropdown panel that contains the search + filters
+    if(!document.getElementById('presetCustomWrapper')){
+      try{
+        const wrapper = document.createElement('div')
+        wrapper.id = 'presetCustomWrapper'
+        wrapper.style.position = 'relative'
+        wrapper.style.display = 'inline-block'
+        wrapper.style.width = sel.style.width || '320px'
+
+        // hide native select but keep it for form compatibility
+        sel.style.display = 'none'
+
+        const btn = document.createElement('button')
+        btn.type = 'button'
+        btn.id = 'presetDropdownBtn'
+        btn.className = 'form-select'
+        btn.style.display = 'flex'
+        btn.style.alignItems = 'center'
+        btn.style.justifyContent = 'space-between'
+        btn.style.width = '100%'
+        btn.textContent = sel.selectedOptions && sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : '(Manual - no preset)'
+
+        const panel = document.createElement('div')
+        panel.id = 'presetDropdownPanel'
+        panel.style.position = 'absolute'
+        panel.style.zIndex = 9999
+        panel.style.top = 'calc(100% + 6px)'
+        panel.style.left = '0'
+        panel.style.height = '560px'
+        panel.style.overflow = 'auto'
+        panel.style.background = 'var(--bg-secondary)'
+        panel.style.border = '1px solid rgba(255,255,255,0.06)'
+        panel.style.padding = '8px'
+        panel.style.borderRadius = '8px'
+        panel.style.display = 'none'
+
+        // move existing controls into the panel. The search input is a separate sibling
+        const ctr = document.getElementById('presetDropdownControls')
+        const inputEl = document.getElementById('presetDropdownSearch')
+        if(ctr){
+          // make controls wrap on small screens
+          ctr.style.display = 'flex'
+          ctr.style.flexWrap = 'wrap'
+          ctr.style.gap = '8px'
+          ctr.style.alignItems = 'center'
+          ctr.style.marginBottom = '6px'
+          // adjust child sizing for controls container
+          Array.from(ctr.children || []).forEach(ch => {
+            try{
+              ch.style.boxSizing = 'border-box'
+              if(ch.tagName && ch.tagName.toLowerCase() === 'input'){
+                ch.style.flex = '1 1 200px'
+                ch.style.minWidth = '120px'
+              } else if(ch.tagName && ch.tagName.toLowerCase() === 'select'){
+                ch.style.flex = '0 0 110px'
+                ch.style.minWidth = '110px'
+              } else if(ch.tagName && ch.tagName.toLowerCase() === 'button'){
+                ch.style.flex = '0 0 auto'
+              } else {
+                ch.style.flex = '1 1 120px'
+              }
+            }catch(e){}
+          })
+          // adjust the standalone search input sizing so it fits nicely above the controls
+          if(inputEl){
+            try{
+              inputEl.style.boxSizing = 'border-box'
+              inputEl.style.flex = '1 1 200px'
+              inputEl.style.minWidth = '120px'
+              inputEl.style.marginBottom = '8px'
+              inputEl.style.width = '100%'
+            }catch(e){}
+          }
+          // create a sticky header inside the panel that holds the search input and controls
+          const headerDiv = document.createElement('div')
+          headerDiv.style.position = 'sticky'
+          headerDiv.style.top = '-8px'
+          headerDiv.style.zIndex = '1001'
+          headerDiv.style.background = 'var(--bg-secondary)'
+          headerDiv.style.paddingBottom = '6px'
+          headerDiv.style.display = 'flex'
+          headerDiv.style.flexWrap = 'wrap'
+          headerDiv.style.gap = '8px'
+          headerDiv.style.paddingTop = '6px'
+          if(inputEl) headerDiv.appendChild(inputEl)
+          headerDiv.appendChild(ctr)
+          panel.appendChild(headerDiv)
+        }
+
+        // list container
+        const listDiv = document.createElement('div')
+        listDiv.id = 'presetDropdownList'
+        listDiv.style.display = 'grid'
+        listDiv.style.gridTemplateColumns = '1fr'
+        listDiv.style.gap = '6px'
+        listDiv.style.marginTop = '6px'
+        panel.appendChild(listDiv)
+
+        wrapper.appendChild(btn)
+        wrapper.appendChild(panel)
+        // responsive sizing helper: make panel width follow device width
+        const adjustPanelSizing = () => {
+          try{
+            const vw = window.innerWidth || document.documentElement.clientWidth
+            if(vw <= 520){
+              panel.style.width = 'calc(100vw - 32px)'
+            } else {
+              panel.style.width = Math.min(480, Math.max(280, vw - 48)) + 'px'
+            }
+          }catch(e){}
+        }
+        // call now and on resize
+        adjustPanelSizing()
+        window.addEventListener('resize', adjustPanelSizing)
+        // store for potential cleanup
+        wrapper._adjustPanelSizing = adjustPanelSizing
+        try{ sel.parentNode.insertBefore(wrapper, sel.nextSibling) }catch(e){}
+
+        const rebuildList = () => {
+          listDiv.innerHTML = ''
+          const opts = Array.from(sel.options || [])
+          opts.forEach(o=>{
+            const row = document.createElement('div')
+            row.className = 'preset-row'
+            row.style.padding = '8px'
+            row.style.borderRadius = '6px'
+            row.style.cursor = 'pointer'
+            row.style.display = 'flex'
+            row.style.justifyContent = 'space-between'
+            row.style.alignItems = 'center'
+            row.style.background = 'rgb(82 82 97 / 9%)'
+            row.textContent = o.textContent
+            row.dataset.value = o.value
+            row.addEventListener('click', ()=>{
+              try{ sel.value = o.value }catch(e){}
+              sel.dispatchEvent(new Event('change'))
+              btn.textContent = o.textContent || '(Manual - no preset)'
+              panel.style.display = 'none'
+            })
+            listDiv.appendChild(row)
+          })
+        }
+
+        // open/close handlers (auto-flip when near viewport edges)
+        btn.addEventListener('click', (ev)=>{
+          ev.preventDefault(); ev.stopPropagation();
+          const isOpening = panel.style.display === 'none' || panel.style.display === ''
+          if(!isOpening){ panel.style.display = 'none'; return }
+
+          // populate list then measure
+          rebuildList()
+          panel.style.display = 'block'
+          panel.style.maxHeight = panel.style.maxHeight || '360px'
+          // allow layout to settle
+          requestAnimationFrame(()=>{
+            try{
+              const rect = btn.getBoundingClientRect()
+              const viewportH = window.innerHeight || document.documentElement.clientHeight
+              const spaceBelow = Math.max(0, viewportH - rect.bottom)
+              const spaceAbove = Math.max(0, rect.top)
+              const desired = Math.min(360, panel.scrollHeight + 16)
+              let openUp = false
+              if(spaceBelow < desired && spaceAbove > spaceBelow) openUp = true
+
+                  const viewportW = window.innerWidth || document.documentElement.clientWidth
+                  const smallScreen = viewportW <= 520
+                  if(smallScreen){
+                    // center and fit on small screens
+                    panel.style.left = '50%'
+                    panel.style.transform = 'translateX(-50%)'
+                    panel.style.top = openUp ? 'auto' : 'calc(100% + 6px)'
+                    panel.style.bottom = openUp ? 'calc(100% + 6px)' : 'auto'
+                    const maxH = Math.max(80, Math.min(Math.floor((window.innerHeight || document.documentElement.clientHeight) * 0.68), 520))
+                    panel.style.maxHeight = maxH + 'px'
+                    panel.style.width = 'calc(100vw - 32px)'
+                  } else {
+                    // normal behavior: open up or down and limit width
+                    panel.style.transform = 'none'
+                    if(openUp){
+                      panel.style.top = 'auto'
+                      panel.style.bottom = 'calc(100% + 6px)'
+                      const maxH = Math.max(80, Math.min(spaceAbove - 20, 360))
+                      panel.style.maxHeight = maxH + 'px'
+                    } else {
+                      panel.style.bottom = 'auto'
+                      panel.style.top = 'calc(100% + 6px)'
+                      const maxH = Math.max(80, Math.min(spaceBelow - 20, 360))
+                      panel.style.maxHeight = maxH + 'px'
+                    }
+                    panel.style.width = 'min(480px, calc(100vw - 48px))'
+                    panel.style.left = '0'
+                  }
+              panel.style.overflowY = 'auto'
+              if(panel.scrollTop) panel.scrollTop = 0
+            }catch(e){ /* ignore measurement errors */ }
+          })
+        })
+
+        // close on outside click
+        document.addEventListener('click', (ev)=>{ if(!wrapper.contains(ev.target)) panel.style.display = 'none' })
+
+        // ensure list updates when filters change
+        const searchEl = document.getElementById('presetDropdownSearch')
+        const platEl = document.getElementById('presetDropdownPlatform')
+        const goalEl = document.getElementById('presetDropdownGoal')
+        if(searchEl) searchEl.addEventListener('input', ()=>{ rebuildList() })
+        if(platEl) platEl.addEventListener('change', ()=>{ rebuildList() })
+        if(goalEl) goalEl.addEventListener('change', ()=>{ rebuildList() })
+      }catch(e){ /* ignore dropdown build errors */ }
+    }
   }
 
   // expose update function globally so main can call it
@@ -1509,17 +2613,21 @@ async function loadModelsFor(prov, modelEl){
     modelEl.appendChild(opt)
   })
 
-  const getKeyForProvider = (p) => {
+  const getKeyForProvider = async (p) => {
     try{
       const raw = localStorage.getItem('ai-settings')
       if(raw){ const s = JSON.parse(raw); const k = s?.keys?.[p]; if(k) return String(k).trim() }
     }catch(e){}
-    return String(localStorage.getItem('ai_api_key')||'').trim()
+    const localKey = String(localStorage.getItem('ai_api_key')||'').trim()
+    if(localKey) return localKey
+    // if no key in localStorage, try to load from backend (user just logged in, key stored server-side)
+    try{ const backendKey = await loadApiKeyFromBackend(p); if(backendKey) return backendKey }catch(e){}
+    return ''
   }
   const lsKeyFor = (p) => `ai_model_${p}`
   const recommendedDefaults = { gemini: 'models/gemini-2.5-flash', openai: 'gpt-4o-mini', openrouter: 'meta-llama/llama-3-8b-instruct', groq: 'llama-3.1-8b-instant', together: 'meta-llama/Llama-3-70b-chat-hf', cohere: 'command-r-plus-08-2024', huggingface: 'meta-llama/Llama-3-70b-chat-hf', deepseek: 'deepseek-chat' }
 
-  const key = getKeyForProvider(prov)
+  const key = await getKeyForProvider(prov)
   const backendURL = getBackendURL()
   if(!key || !backendURL){
     const saved = localStorage.getItem(lsKeyFor(prov)) || recommendedDefaults[prov] || ''
@@ -1531,7 +2639,10 @@ async function loadModelsFor(prov, modelEl){
   try{
     const ctrl = new AbortController()
     const t = setTimeout(()=>ctrl.abort(), 800)
-    const ping = await fetch(backendURL + '/ai/debug', { signal: ctrl.signal })
+    const ping = await fetch(backendURL + '/ai/debug', { 
+      signal: ctrl.signal,
+      headers: getAuthHeaders()
+    })
     clearTimeout(t)
     if(!ping.ok){ throw new Error('Backend debug ping failed') }
   }catch(e){
@@ -1542,7 +2653,9 @@ async function loadModelsFor(prov, modelEl){
   }
 
   try{
-    const res = await fetch(`${backendURL}/ai/models?provider=${encodeURIComponent(prov)}&apiKey=${encodeURIComponent(key)}`)
+    const res = await fetch(`${backendURL}/ai/models?provider=${encodeURIComponent(prov)}&apiKey=${encodeURIComponent(key)}`, {
+      headers: getAuthHeaders()
+    })
     const json = await res.json().catch(()=>({}))
     if(json?.error){
       console.warn('loadModelsFor: backend returned error', json.error)
@@ -1572,6 +2685,21 @@ async function loadModelsFor(prov, modelEl){
   const choose = saved || fallback
   if(choose) modelEl.value = choose
 }
+
+// Helpers: format audio object for display or copy
+function formatAudioDisplay(audio){
+  try{
+    if(!audio) return ''
+    const parts = []
+    if(audio.style) parts.push('Style: ' + audio.style)
+    if(audio.mood) parts.push('Mood: ' + audio.mood)
+    if(audio.genre) parts.push('Genre: ' + audio.genre)
+    if(audio.suggestion) parts.push('Suggestion: ' + audio.suggestion)
+    if(audio.length) parts.push('Length: ' + audio.length)
+    return parts.join('\n')
+  }catch(e){ return '' }
+}
+function formatAudioJson(audio){ try{ return JSON.stringify(audio || {}, null, 2) }catch(e){ return '' } }
 async function generateFromMain(){
   const title = (document.getElementById('aiMainTitle')?.value || '').trim()
   const overview = (document.getElementById('aiMainOverview')?.value || '').trim()
@@ -1580,118 +2708,167 @@ async function generateFromMain(){
     return
   }
 
-  const lang = document.getElementById('aiLangSelect')?.value || 'id'
-  const prov = document.getElementById('aiProviderSelect')?.value || 'gemini'
-  const model = document.getElementById('aiModelSelect')?.value || ''
-  const apiKey = (function(){ try{ const raw = localStorage.getItem('ai-settings'); if(raw){ const s = JSON.parse(raw); const k = s?.keys?.[prov]; if(k) return String(k).trim() } }catch(e){} return String(localStorage.getItem('ai_api_key')||'').trim() })()
-  const platformEl = document.getElementById('aiPlatformSelect')
-  const platforms = platformEl ? [platformEl.value] : ['youtube']
-  const { tone } = getEffectiveToneAndKeywords()
-  const keywords = getSelectedKeywords()
-  let presetInstructions = ''
-  let presetObj = null
-  try{
-    const presetSel = document.getElementById('aiPresetSelect')
-    const presetKey = presetSel ? String(presetSel.value||'').trim() : ''
-    if(presetKey){
-      presetObj = window.PresetsManager.get(presetKey)
-      if(presetObj) presetInstructions = (window.PresetsManager.buildPresetInstructions && window.PresetsManager.buildPresetInstructions(presetObj)) || ''
-    }
-  }catch(e){}
-
-  const panel = document.getElementById('aiResultPanel')
-  panel.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:24px;color:#888"><span class="spinner" style="display:inline-block;width:20px;height:20px;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:genco-spin 0.8s linear infinite"></span> Generating...</div>'
-  if(!document.getElementById('genco-spinner-style')){
-    const style = document.createElement('style')
-    style.id = 'genco-spinner-style'
-    style.textContent = '@keyframes genco-spin { to { transform: rotate(360deg); } }'
-    document.head.appendChild(style)
+  // 🆕 LOADING STATE
+  const btn = document.getElementById('aiGenerateBtn')
+  const btnOriginalLabel = btn?.textContent || 'Generate'
+  if (btn) {
+    btn.disabled = true
+    btn.textContent = '⏳ Generating...'
   }
 
-  const extractJson = (txt) => { const m = String(txt||'').match(/\{[\s\S]*\}/); if(!m) return null; try{ return JSON.parse(m[0]) }catch(e){ return null } }
-  const forceJsonPrompt = (basePrompt) => `${basePrompt}\n\nIMPORTANT: Return ONLY valid JSON. No markdown, no explanations. If you cannot, output {"title":"","description":"","hashtags":[],"hook":"","narratorScript":""} only.`.trim()
+  try {
+    const lang = document.getElementById('aiLangSelect')?.value || 'id'
+    const prov = document.getElementById('aiProviderSelect')?.value || 'gemini'
+    const model = document.getElementById('aiModelSelect')?.value || ''
+    
+    // 🆕 BARU: Use async getKeyForProvider with auto-load fallback
+    let apiKey = await getKeyForProvider(prov)
+    
+    // 🆕 BARU: Retry once if failed
+    if (!apiKey) {
+      showToast('Loading API key dari backend...', 'info')
+      apiKey = await loadApiKeyFromBackend(prov)
+    }
+    
+    const platformEl = document.getElementById('aiPlatformSelect')
+    const platforms = platformEl ? [platformEl.value] : ['youtube']
+    const { tone } = getEffectiveToneAndKeywords()
+    const keywords = getSelectedKeywords()
+    let presetInstructions = ''
+    let presetObj = null
+    try{
+      const presetSel = document.getElementById('aiPresetSelect')
+      const presetKey = presetSel ? String(presetSel.value||'').trim() : ''
+      if(presetKey){
+        presetObj = window.PresetsManager.get(presetKey)
+        if(presetObj) presetInstructions = (window.PresetsManager.buildPresetInstructions && window.PresetsManager.buildPresetInstructions(presetObj)) || ''
+      }
+    }catch(e){}
 
-  try{
-    if(!apiKey) throw new Error('AI API key is empty for selected provider (set it in Settings, then Save)')
-    const results = []
+    const panel = document.getElementById('aiResultPanel')
+    panel.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:24px;color:#888"><span class="spinner" style="display:inline-block;width:20px;height:20px;border:2px solid rgba(255,255,255,0.2);border-top-color:#0072ff;border-radius:50%;animation:genco-spin 0.8s linear infinite"></span> Generating...</div>'
+    if(!document.getElementById('genco-spinner-style')){
+      const style = document.createElement('style')
+      style.id = 'genco-spinner-style'
+      style.textContent = '@keyframes genco-spin { to { transform: rotate(360deg); } }'
+      document.head.appendChild(style)
+    }
 
-    for(const platform of (platforms.length?platforms:['youtube'])){
-      aiLog('info','generate.request.prepare',{ provider: prov, model, lang, platform, title, overview, keywords, tone, apiKeyPresent: !!apiKey, apiKeyMasked: maskKey(apiKey) })
-      const prompt = buildFullPrompt({ title, overview, platform, lang, preset: presetObj, tone: tone || 'neutral', keywords, presetInstructions })
+    const extractJson = (txt) => { const m = String(txt||'').match(/\{[\s\S]*\}/); if(!m) return null; try{ return JSON.parse(m[0]) }catch(e){ return null } }
+    const forceJsonPrompt = (basePrompt) => `${basePrompt}\n\nIMPORTANT: Return ONLY valid JSON. No markdown, no explanations. If you cannot, output {"title":"","description":"","hashtags":[],"hook":"","narratorScript":""} only.`.trim()
 
-      let raw = null
-      aiLog('debug','generate.prompt',{ prompt })
-      const start = performance.now()
-      try{
-        raw = await window.AI.generate({ provider: prov, apiKey, prompt, model })
-        const duration = Math.round(performance.now() - start)
-        aiLog('info','generate.response',{ platform, durationMs: duration, rawLength: String(raw||'').length })
-      }catch(e){ raw = String(e?.message||e); aiLog('error','generate.error',{ platform, error: String(e) }) }
+    try{
+      if(!apiKey) throw new Error('AI API key is empty for selected provider (set it in Settings, then Save)')
+      const results = []
 
-      let parsed = extractJson(String(raw || ''))
-      if(!parsed){
-        try{ const reprompt = forceJsonPrompt(prompt); const raw2 = await window.AI.generate({ provider: prov, apiKey, prompt: reprompt, model }); parsed = extractJson(raw2); aiLog('info','generate.reprompt',{ platform, repromptUsed: true }) }catch(e){ aiLog('error','generate.reprompt.error',{ platform, error: String(e) }) }
+      for(const platform of (platforms.length?platforms:['youtube'])){
+        aiLog('info','generate.request.prepare',{ provider: prov, model, lang, platform, title, overview, keywords, tone, apiKeyPresent: !!apiKey, apiKeyMasked: maskKey(apiKey) })
+        let prompt = buildFullPrompt({ title, overview, platform, lang, preset: presetObj, tone: tone || 'neutral', keywords, presetInstructions })
+        // if preset requests audio preferences, append explicit audio instruction
+        try{
+          if(presetObj && (presetObj.audioStyle || presetObj.musicMood || presetObj.audioGenre || presetObj.musicSuggestion || presetObj.audioLength)){
+            prompt += '\n\nIMPORTANT: If applicable include an "audio" object in the JSON with keys: "style","mood","genre","suggestion","length". Use concise phrases.'
+          }
+        }catch(e){}
+
+        let raw = null
+        aiLog('debug','generate.prompt',{ prompt })
+        const start = performance.now()
+        try{
+          raw = await window.AI.generate({ provider: prov, apiKey, prompt, model })
+          const duration = Math.round(performance.now() - start)
+          aiLog('info','generate.response',{ platform, durationMs: duration, rawLength: String(raw||'').length })
+        }catch(e){ raw = String(e?.message||e); aiLog('error','generate.error',{ platform, error: String(e) }) }
+
+        let parsed = extractJson(String(raw || ''))
+        if(!parsed){
+          try{ const reprompt = forceJsonPrompt(prompt); const raw2 = await window.AI.generate({ provider: prov, apiKey, prompt: reprompt, model }); parsed = extractJson(raw2); aiLog('info','generate.reprompt',{ platform, repromptUsed: true }) }catch(e){ aiLog('error','generate.reprompt.error',{ platform, error: String(e) }) }
+        }
+
+        if(!parsed) parsed = { title: '', description: String(raw||'').slice(0,800), hashtags: [], hook: '', narratorScript: '' }
+        if(!parsed.hook) parsed.hook = ''
+        if(!parsed.narratorScript) parsed.narratorScript = ''
+        // Ensure audio object present when preset suggests audio preferences
+        try{
+          if(!parsed) parsed = {}
+          if(!parsed.audio && presetObj && (presetObj.audioStyle || presetObj.musicMood || presetObj.audioGenre || presetObj.musicSuggestion || presetObj.audioLength)){
+            parsed.audio = {
+              style: (parsed.audio && parsed.audio.style) || presetObj.audioStyle || '',
+              mood: (parsed.audio && parsed.audio.mood) || presetObj.musicMood || '',
+              genre: (parsed.audio && parsed.audio.genre) || presetObj.audioGenre || '',
+              suggestion: (parsed.audio && parsed.audio.suggestion) || presetObj.musicSuggestion || '',
+              length: (parsed.audio && parsed.audio.length) || presetObj.audioLength || ''
+            }
+          }
+        }catch(e){ /* ignore */ }
+        aiLog('info','generate.parsed',{ platform, parsed })
+        results.push({ platform, parsed })
       }
 
-      if(!parsed) parsed = { title: '', description: String(raw||'').slice(0,800), hashtags: [], hook: '', narratorScript: '' }
-      if(!parsed.hook) parsed.hook = ''
-      if(!parsed.narratorScript) parsed.narratorScript = ''
-      aiLog('info','generate.parsed',{ platform, parsed })
-      results.push({ platform, parsed })
-    }
-
-    const esc = (s)=> String(s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    const batchId = Date.now()
-    panel.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><strong>Results</strong><div><button id="aiExportCSV" style="padding:6px 10px;border-radius:6px;margin-left:8px">Export CSV</button></div></div>'
-    results.forEach(({ platform, parsed })=>{
-      const idSafe = `aiRes_${platform}`
-      const feedbackId = `${batchId}_${platform}`
-      const card = document.createElement('div')
-      card.style.borderTop = '1px solid rgba(255,255,255,0.04)'
-      card.style.paddingTop = '10px'
-      card.style.marginTop = '10px'
-      card.innerHTML = `
-        <div style="display:flex;justify-content:space-between;align-items:flex-start">
-          <strong style="text-transform:capitalize">${platform}</strong>
-          <div style="display:flex;flex-wrap:wrap;gap:6px">
-            <button data-feedback-id="${feedbackId}" data-feedback-rating="good" style="padding:4px 8px;border-radius:6px;font-size:11px">Bagus</button>
-            <button data-feedback-id="${feedbackId}" data-feedback-rating="bad" style="padding:4px 8px;border-radius:6px;font-size:11px">Kurang</button>
-            <button data-copy-all="${idSafe}" style="padding:6px;border-radius:6px">Copy all</button>
-            <button data-copy-caption="${idSafe}" style="padding:6px;border-radius:6px">Copy as caption</button>
-            <button data-copy-target="${idSafe}_title" style="padding:6px;border-radius:6px">Copy Title</button>
-            <button data-copy-target="${idSafe}_desc" style="padding:6px;border-radius:6px">Copy Desc</button>
-            <button data-copy-target="${idSafe}_hook" style="padding:6px;border-radius:6px">Copy Hook</button>
-            <button data-copy-target="${idSafe}_narrator" style="padding:6px;border-radius:6px">Copy Script</button>
-            <button data-copy-target="${idSafe}_tags" style="padding:6px;border-radius:6px">Copy Tags</button>
+      const esc = (s)=> String(s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      const batchId = Date.now()
+      panel.innerHTML = '<div style="margin-bottom:8px"><strong>Results</strong></div>'
+      results.forEach(({ platform, parsed })=>{
+        const idSafe = `aiRes_${platform}`
+        const feedbackId = `${batchId}_${platform}`
+        const card = document.createElement('div')
+        card.style.borderTop = '1px solid rgba(255,255,255,0.04)'
+        card.style.paddingTop = '10px'
+        card.style.marginTop = '10px'
+        card.innerHTML = `
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap: wrap;gap:12px">
+            <div style="display:flex;gap:20px;">
+              <div style="display:flex;align-items:center;gap:12px">
+                <span style="background:rgba(255,255,255,0.03);padding:4px 8px;border-radius:6px;font-size:12px;text-transform:capitalize">${platform}</span>
+              </div>
+              <div class="feedback-group" style="display:flex;gap:6px">
+                <button data-feedback-id="${feedbackId}" data-feedback-rating="good" style="min-height: 30px;padding:6px 10px;border-radius:6px;font-size:12px">Bagus</button>
+                <button data-feedback-id="${feedbackId}" data-feedback-rating="bad" style="min-height: 30px;padding:6px 10px;border-radius:6px;font-size:12px">Kurang</button>
+              </div>
+              </div>
+               <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+              <div class="copy-group" style="display:flex;gap:6px;flex-wrap:wrap">
+                <button data-copy-all="${idSafe}" style="min-height: 30px;padding:4px;border-radius:6px">Copy all</button>
+                <button data-copy-caption="${idSafe}" style="min-height: 30px;padding:4px;border-radius:6px">Copy main</button>
+                <button data-copy-target="${idSafe}_title" style="min-height: 30px;padding:4px;border-radius:6px">Copy Title</button>
+                <button data-copy-target="${idSafe}_desc" style="min-height: 30px;padding:4px;border-radius:6px">Copy Desc</button>
+                <button data-copy-target="${idSafe}_hook" style="min-height: 30px;padding:4px;border-radius:6px">Copy Hook</button>
+                <button data-copy-target="${idSafe}_narrator" style="min-height: 30px;padding:4px;border-radius:6px">Copy Script</button>
+                <button data-copy-target="${idSafe}_tags" style="min-height: 30px;padding:4px;border-radius:6px">Copy Tags</button>
+                <button data-copy-audio="${idSafe}" style="min-height: 30px;padding:4px;border-radius:6px">Copy Audio</button>
+              </div>
+            </div>
           </div>
-        </div>
-        <div style="margin-top:8px;font-size:12px;color:#b0b0b0">Title</div>
-        <div id="${idSafe}_title" style="margin-top:4px;color:#d9cd71">${esc(parsed.title)}</div>
-        <div style="margin-top:8px;font-size:12px;color:#b0b0b0">Description / Overview</div>
-        <div id="${idSafe}_desc" style="margin-top:4px;color:#fff">${esc(parsed.description)}</div>
-        <div style="margin-top:8px;font-size:12px;color:#b0b0b0">Hook</div>
-        <div id="${idSafe}_hook" style="margin-top:4px;color:#e8c547">${esc(parsed.hook)}</div>
-        <div style="margin-top:8px;font-size:12px;color:#b0b0b0">Script narator/voice</div>
-        <div id="${idSafe}_narrator" style="margin-top:4px;color:#a8d8ea">${esc(parsed.narratorScript)}</div>
-        <div style="margin-top:8px;font-size:12px;color:#b0b0b0">Hashtags</div>
-        <div id="${idSafe}_tags" style="margin-top:4px;color:#2c9dc1">${Array.isArray(parsed.hashtags)?parsed.hashtags.join(' '):(parsed.hashtags||'')}</div>
-      `
-      panel.appendChild(card)
-    })
-
-    // per-card copy wiring
-    function copyTextAndToast(text, btn, prevLabel){
-      if(!text){ showToast('Nothing to copy', 'info'); return }
-      navigator.clipboard.writeText(text).then(()=>{ showToast('Copied to clipboard', 'success'); if(btn){ const prev = prevLabel != null ? prevLabel : btn.textContent; btn.textContent = 'Copied'; setTimeout(()=> btn.textContent = prev, 1200) } }).catch(()=> showToast('Copy failed', 'error'))
-    }
-    panel.querySelectorAll('button[data-copy-target]').forEach(b=>{
-      b.addEventListener('click', ()=>{
-        const tgt = b.getAttribute('data-copy-target')
-        const el = document.getElementById(tgt)
-        const text = el ? el.textContent : ''
-        copyTextAndToast(text, b)
+          <div style="margin-top:15px;font-size:12px;color:var(--caption-txt-output)">Title</div>
+          <div id="${idSafe}_title" style="margin-top:4px;color:var(--color-title-gen);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${esc(parsed.title)}</div>
+          <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Description / Overview</div>
+          <div id="${idSafe}_desc" style="margin-top:4px;color:var(--color-desc);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${esc(parsed.description)}</div>
+          <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Hook</div>
+          <div id="${idSafe}_hook" style="margin-top:4px;color:var(--color-hooks);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${esc(parsed.hook)}</div>
+          <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Script narator/voice</div>
+          <div id="${idSafe}_narrator" style="margin-top:4px;color:var(--color-narrator);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${esc(parsed.narratorScript)}</div>
+          <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Hashtags</div>
+          <div id="${idSafe}_tags" style="margin-top:4px;color:var(--color-tags);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${Array.isArray(parsed.hashtags)?parsed.hashtags.join(' '):(parsed.hashtags||'')}</div>
+          <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Audio Recommendation</div>
+          <div id="${idSafe}_audio" style="margin-top:4px;color:var(--color-audio);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;white-space:pre-line">${''}</div>
+        `
+        panel.appendChild(card)
+        try{ const audioEl = document.getElementById(idSafe + '_audio'); if(audioEl) audioEl.textContent = formatAudioDisplay(parsed.audio) }catch(e){}
       })
-    })
+
+      // per-card copy wiring
+      function copyTextAndToast(text, btn, prevLabel){
+        if(!text){ showToast('Nothing to copy', 'info'); return }
+        navigator.clipboard.writeText(text).then(()=>{ showToast('Copied to clipboard', 'success'); if(btn){ const prev = prevLabel != null ? prevLabel : btn.textContent; btn.textContent = 'Copied'; setTimeout(()=> btn.textContent = prev, 1200) } }).catch(()=> showToast('Copy failed', 'error'))
+      }
+      panel.querySelectorAll('button[data-copy-target]').forEach(b=>{
+        b.addEventListener('click', ()=>{
+          const tgt = b.getAttribute('data-copy-target')
+          const el = document.getElementById(tgt)
+          const text = el ? el.textContent : ''
+          copyTextAndToast(text, b)
+        })
+      })
     panel.querySelectorAll('button[data-copy-all]').forEach(b=>{
       b.addEventListener('click', ()=>{
         const prefix = b.getAttribute('data-copy-all')
@@ -1709,6 +2886,17 @@ async function generateFromMain(){
         const tags = tagsEl ? tagsEl.textContent : ''
         const text = tags ? (desc + '\n\n' + tags).trim() : desc
         copyTextAndToast(text, b)
+      })
+    })
+    // copy audio info
+    panel.querySelectorAll('button[data-copy-audio]').forEach(b=>{
+      b.addEventListener('click', ()=>{
+        const prefix = b.getAttribute('data-copy-audio')
+        // copy JSON representation for convenience
+        const audioEl = document.getElementById(prefix + '_audio')
+        const audioText = audioEl ? audioEl.textContent : ''
+        const toCopy = audioText ? audioText : ''
+        copyTextAndToast(toCopy, b)
       })
     })
     panel.querySelectorAll('button[data-feedback-id]').forEach(b=>{
@@ -1737,6 +2925,13 @@ async function generateFromMain(){
     const goals = (presetObj && Array.isArray(presetObj.goal) && presetObj.goal.length) ? presetObj.goal.join(', ') : ''
     pushGenerateHistory({ ts: Date.now(), title, overview, platform: platforms[0], presetKey: presetObj ? (document.getElementById('aiPresetSelect')?.value || '') : '', goals, type: 'generate', results })
   }catch(err){ console.error('AI generation failed', err); showToast(err && err.message ? err.message : 'AI generation failed.', 'error'); panel.innerHTML = '<div style="padding:12px;color:#c66">AI generation failed. See console.</div>' }
+  finally {
+    // 🆕 RESTORE BUTTON STATE
+    if (btn) {
+      btn.disabled = false
+      btn.textContent = btnOriginalLabel
+    }
+  }
 }
 
 async function generateVariations(count) {
@@ -1775,13 +2970,29 @@ async function generateVariations(count) {
     const batchIdVar = Date.now()
     for(let i=0;i<resolvedCount;i++){
       if(loadingEl) loadingEl.textContent = `Variasi ${i+1}/${resolvedCount}...`
-      const prompt = buildFullPrompt({ title, overview, platform, lang, preset: presetObj, tone: tone || 'neutral', keywords, presetInstructions })
+      let prompt = buildFullPrompt({ title, overview, platform, lang, preset: presetObj, tone: tone || 'neutral', keywords, presetInstructions })
+      try{
+        if(presetObj && (presetObj.audioStyle || presetObj.musicMood || presetObj.audioGenre || presetObj.musicSuggestion || presetObj.audioLength)){
+          prompt += '\n\nIMPORTANT: If applicable include an "audio" object in the JSON with keys: "style","mood","genre","suggestion","length". Use concise phrases.'
+        }
+      }catch(e){}
 
       let raw = null
       try{ raw = await window.AI.generate({ provider: prov, apiKey, prompt, model }) }catch(e){ raw = String(e?.message||e) }
 
       let parsed = extractJson(String(raw || ''))
       if(!parsed) parsed = { title: '', description: String(raw||'').slice(0,800), hashtags: [], hook: '', narratorScript: '' }
+      try{
+        if(!parsed.audio && presetObj && (presetObj.audioStyle || presetObj.musicMood || presetObj.audioGenre || presetObj.musicSuggestion || presetObj.audioLength)){
+          parsed.audio = {
+            style: (parsed.audio && parsed.audio.style) || presetObj.audioStyle || '',
+            mood: (parsed.audio && parsed.audio.mood) || presetObj.musicMood || '',
+            genre: (parsed.audio && parsed.audio.genre) || presetObj.audioGenre || '',
+            suggestion: (parsed.audio && parsed.audio.suggestion) || presetObj.musicSuggestion || '',
+            length: (parsed.audio && parsed.audio.length) || presetObj.audioLength || ''
+          }
+        }
+      }catch(e){}
       if(!parsed.hook) parsed.hook = ''
       if(!parsed.narratorScript) parsed.narratorScript = ''
       results.push({ i: i+1, parsed, raw })
@@ -1792,8 +3003,31 @@ async function generateVariations(count) {
       card.style.borderTop = '1px solid rgba(255,255,255,0.04)'
       card.style.paddingTop = '10px'
       card.style.marginTop = '10px'
-      card.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:flex-start"><strong>Var ${i+1}</strong><div style="display:flex;flex-wrap:wrap;gap:6px"><button data-feedback-id="${feedbackIdVar}" data-feedback-rating="good" style="padding:4px 8px;border-radius:6px;font-size:11px">Bagus</button><button data-feedback-id="${feedbackIdVar}" data-feedback-rating="bad" style="padding:4px 8px;border-radius:6px;font-size:11px">Kurang</button><button data-copy-all="var_${i}">Copy all</button><button data-copy-caption="var_${i}">Copy as caption</button><button data-copy-target="var_${i}_title">Copy Title</button><button data-copy-target="var_${i}_desc">Copy Desc</button><button data-copy-target="var_${i}_hook">Copy Hook</button><button data-copy-target="var_${i}_narrator">Copy Script</button><button data-copy-target="var_${i}_tags">Copy Tags</button></div></div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Title</div><div id="var_${i}_title" style="margin-top:4px;color:#d9cd71;background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.title)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Description / Overview</div><div id="var_${i}_desc" style="margin-top:4px;color:#fff;background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.description)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Hook</div><div id="var_${i}_hook" style="margin-top:4px;color:#e8c547;background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.hook)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Script narator/voice</div><div id="var_${i}_narrator" style="margin-top:4px;color:#a8d8ea;background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.narratorScript)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Hashtags</div><div id="var_${i}_tags" style="margin-top:4px;color:#2c9dc1;background:#040f1abd;padding:10px;border-radius:8px">${Array.isArray(parsed.hashtags)?parsed.hashtags.join(' '):(parsed.hashtags||'')}</div>`
+      card.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap: wrap;gap:12px">
+      <div style="display:flex;gap:20px;">
+            <div style="display:flex;align-items:center;gap:12px">
+              <span style="background:rgba(255,255,255,0.03);padding:4px 8px;border-radius:6px;font-size:12px;text-transform:capitalize">${platform}</span><strong>Var ${i+1}</strong>
+            </div>
+            <div class="feedback-group" style="display:flex;gap:6px">
+              <button data-feedback-id="${feedbackIdVar}" data-feedback-rating="good" style="min-height: 30px;padding:6px 10px;border-radius:6px;font-size:12px">Bagus</button>
+    <button data-feedback-id="${feedbackIdVar}" data-feedback-rating="bad" style="min-height: 30px;padding:6px 10px;border-radius:6px;font-size:12px">Kurang</button></div></div>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+  <div class="copy-group" style="display:flex;gap:6px;flex-wrap:wrap">
+    <button data-copy-all="var_${i}" style="min-height: 30px;padding:4px;border-radius:6px">Copy all</button>
+    <button data-copy-caption="var_${i}" style="min-height: 30px;padding:4px;border-radius:6px">Copy as caption</button>
+    <button data-copy-target="var_${i}_title" style="min-height: 30px;padding:4px;border-radius:6px">Copy Title</button>
+    <button data-copy-target="var_${i}_desc" style="min-height: 30px;padding:4px;border-radius:6px">Copy Desc</button>
+    <button data-copy-target="var_${i}_hook" style="min-height: 30px;padding:4px;border-radius:6px">Copy Hook</button>
+    <button data-copy-target="var_${i}_narrator" style="min-height: 30px;padding:4px;border-radius:6px">Copy Script</button>
+    <button data-copy-target="var_${i}_tags" style="min-height: 30px;padding:4px;border-radius:6px">Copy Tags</button>
+    <button data-copy-audio="var_${i}" style="min-height: 30px;padding:4px;border-radius:6px">Copy Audio</button>
+  </div>
+</div>
+</div>
+      <div style="margin-top:6px;font-size:12px;color:#b0b0b0">Title</div><div id="var_${i}_title" style="margin-top:4px;color:#d9cd71;background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.title)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Description / Overview</div><div id="var_${i}_desc" style="margin-top:4px;color:var(--color-desc);background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.description)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Hook</div><div id="var_${i}_hook" style="margin-top:4px;color:var(--color-hook);background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.hook)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Script narator/voice</div><div id="var_${i}_narrator" style="margin-top:4px;color:var(--color-narrator);background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.narratorScript)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Hashtags</div><div id="var_${i}_tags" style="margin-top:4px;color:#var(--color-tags);background:#040f1abd;padding:10px;border-radius:8px">${Array.isArray(parsed.hashtags)?parsed.hashtags.join(' '):(parsed.hashtags||'')}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Audio Recommendation</div><div id="var_${i}_audio" style="margin-top:4px;color:var(--color-audio);background:#040f1abd;padding:10px;border-radius:8px;white-space:pre-line"></div>`
       panel.appendChild(card)
+      try{ const audioEl = document.getElementById('var_' + i + '_audio'); if(audioEl) audioEl.textContent = formatAudioDisplay(parsed.audio) }catch(e){}
     }
 
     if(loadingEl) loadingEl.textContent = ''
@@ -1824,6 +3058,14 @@ async function generateVariations(count) {
         const desc = descEl ? descEl.textContent : ''
         const tags = tagsEl ? tagsEl.textContent : ''
         copyTextAndToastVar(tags ? (desc + '\n\n' + tags).trim() : desc, b)
+      })
+    })
+    panel.querySelectorAll('button[data-copy-audio]').forEach(b=>{
+      b.addEventListener('click', ()=>{
+        const prefix = b.getAttribute('data-copy-audio')
+        const audioEl = document.getElementById(prefix + '_audio')
+        const text = audioEl ? audioEl.textContent : ''
+        copyTextAndToastVar(text, b)
       })
     })
     panel.querySelectorAll('button[data-feedback-id]').forEach(b=>{
@@ -2042,7 +3284,17 @@ async function openModal(id){ console.warn('openModal disabled - modal removed f
 
 function closeModal(){
   const modal = document.getElementById('modal')
-  if(modal) modal.style.display = 'none'
+  if(!modal) return
+
+  // Add closing animation class
+  modal.classList.add('closing')
+  
+  // Wait for animation to finish, then hide
+  setTimeout(() => {
+    modal.style.display = 'none'
+    modal.classList.remove('closing') // Reset untuk future opens
+  }, 300) // Match var(--transition-fast) = 200ms + buffer
+
   // remove item query param (pattern used: ?=id-slug) without adding a history entry
   try{
     if(window.location.search && window.location.search.startsWith('?=')){
@@ -2309,5 +3561,25 @@ document.addEventListener('DOMContentLoaded', ()=>{
   }) }
     attachClick(modalPoster, 'poster')
     attachClick(modalBackdropImage, 'backdrop')
+})
+
+// Auto-load API key from backend on startup for device/browser new scenario
+document.addEventListener('DOMContentLoaded', async ()=>{
+  try{
+    // Get current provider from localStorage or use default
+    const settings = localStorage.getItem('ai-settings')
+    let provider = 'single'
+    if(settings){
+      try{ const parsed = JSON.parse(settings); provider = parsed.provider || 'single' }
+      catch(e){}
+    }
+    
+    // Auto-load key from backend (will cache to localStorage + populate Settings input)
+    aiLog('info','initializeAIGenerator.start',{ provider })
+    await loadApiKeyFromBackend(provider)
+    aiLog('info','initializeAIGenerator.complete',{ provider })
+  }catch(err){
+    aiLog('error','initializeAIGenerator.failed',{ error: String(err) })
+  }
 })
 
