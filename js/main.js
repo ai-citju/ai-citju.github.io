@@ -920,6 +920,8 @@ function mountAIGeneratorMain(){
     function loadKeyForProvider(provider){
       const s = getStoredAI()
       const backendURL = getBackendURL()
+      const keyInputEl = document.getElementById('settingsKey_single')
+      if(keyInputEl) keyInputEl.dataset.serverHasKey = '0'
 
       document.getElementById('settingsKeyLabel').textContent = `API Key for ${provider}`
       // clear status while loading
@@ -943,6 +945,8 @@ function mountAIGeneratorMain(){
             const serverKey = (!j?.error ? (j.apiKey || '') : '')
             const useKey = (serverKey && serverKey.includes('...')) ? (s.keys?.[provider] || '') : (s.keys?.[provider] || '')
             document.getElementById('settingsKey_single').value = useKey
+            const keyInput = document.getElementById('settingsKey_single')
+            if(keyInput) keyInput.dataset.serverHasKey = (j && j.hasKey) ? '1' : '0'
           }catch(e){}
           // Query debug endpoint to show whether KV is bound in this runtime
           try{
@@ -971,13 +975,19 @@ function mountAIGeneratorMain(){
       const provider = document.getElementById('settingsDefaultProvider').value
       const input = document.getElementById('settingsKey_single')
       let key = input ? String(input.value||'').trim() : ''
+      const hasServerKey = !!(input && input.dataset && input.dataset.serverHasKey === '1')
 
       // If key looks masked, backend no longer returns full key to frontend.
       if(key && key.includes('...')){
-        return showStatus('❌ API key ter-mask — masukkan ulang API key untuk test manual', 'error')
+        if(!hasServerKey){
+          return showStatus('❌ API key ter-mask — masukkan ulang API key untuk test manual', 'error')
+        }
+        key = ''
       }
 
-      if(!key) return showStatus('❌ API key tidak boleh kosong', 'error')
+      if(!key && !hasServerKey){
+        return showStatus('❌ API key tidak boleh kosong', 'error')
+      }
       
       const backendURL = getBackendURL()
       if(!backendURL) return showStatus('❌ Backend URL tidak dikonfigurasi', 'error')
@@ -993,10 +1003,15 @@ function mountAIGeneratorMain(){
         const timeoutId = setTimeout(()=> controller.abort(), 8000)
         
         // POST request dengan API key di body (aman)
+        const usingServerKey = !key && hasServerKey
+        if(usingServerKey){
+          showStatus('⏳ Menguji API key yang tersimpan di server...', 'info')
+        }
+
         const response = await fetch(`${backendURL}/ai/models`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-          body: JSON.stringify({ provider, apiKey: key }),
+          body: JSON.stringify(usingServerKey ? { provider } : { provider, apiKey: key }),
           signal: controller.signal
         })
         
@@ -1034,7 +1049,10 @@ function mountAIGeneratorMain(){
                                     errorMsg.includes('authentication')
           
           if(isInvalidKeyError){
-            showStatus(`❌ Invalid API key - pastikan key benar\nDetail: ${errorData.error}`, 'error')
+            const extra = provider === 'gemini'
+              ? '\nHint: untuk backend/worker, pakai Gemini key tanpa HTTP referrer restriction.'
+              : ''
+            showStatus(`❌ Invalid API key - pastikan key benar${extra}\nDetail: ${errorData.error}`, 'error')
             aiLog('warn', 'testKey.invalid', { provider, error: errorData.error })
           } else {
             showStatus(`🔴 Backend error (500) - tim support sedang perbaiki\nDetail: ${errorData.error || 'Unknown error'}`, 'error')
