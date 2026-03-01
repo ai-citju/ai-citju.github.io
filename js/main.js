@@ -495,6 +495,16 @@ function mountAIGeneratorMain(){
         <div class="content-main">
           <section class="left-col">
             <div class="panel card">
+              <h4 style="margin:0 0 8px 0">Presets</h4>
+              <div style="display:flex;gap:8px;align-items:stretch;flex-wrap:wrap">
+                <select id="aiPresetSelect" class="form-select" style="flex:1;min-width:150px">
+                  <option value="">(Manual - no preset)</option>
+                </select>
+                <button id="managePresetsBtn" class="secondary" style="min-width:100px">Manage</button>
+              </div>
+            </div>
+
+            <div class="panel card">
               <input id="aiMainTitle" class="form-input" placeholder="Topic / Title" />
               <div id="aiTitleCounter" class="char-counter" style="font-size:11px;margin:5px;min-height:14px">0 / 60</div>
               <textarea id="aiMainOverview" class="form-textarea" placeholder="Overview / Description"></textarea>
@@ -524,16 +534,6 @@ function mountAIGeneratorMain(){
                   <button id="aiVariationsBtn" class="secondary">Buat 3 variasi</button>
                   <button id="aiClearBtn" class="secondary">Clear</button>
                 </div>
-              </div>
-            </div>
-
-            <div class="panel card">
-              <h4 style="margin:0 0 8px 0">Presets</h4>
-              <div style="display:flex;gap:8px;align-items:stretch;flex-wrap:wrap">
-                <select id="aiPresetSelect" class="form-select" style="flex:1;min-width:150px">
-                  <option value="">(Manual - no preset)</option>
-                </select>
-                <button id="managePresetsBtn" class="secondary" style="min-width:100px">Manage</button>
               </div>
             </div>
 

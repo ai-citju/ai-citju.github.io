@@ -4,13 +4,25 @@
     location.hostname === "127.0.0.1" ||
     location.hostname === "::1";
 
+  const PRODUCTION_BACKEND = "https://genco-backend.sajarotunkasim.workers.dev";
   const STAGING_BACKEND = "https://genco-backend-staging.sajarotunkasim.workers.dev";
   const LOCAL_WRANGLER = "http://127.0.0.1:8787";
-  // ?backend=staging → pakai backend deploy meski di localhost (untuk testing sebelum deploy ke GitHub Pages)
-  const useStagingFromLocal = typeof URLSearchParams !== "undefined" && new URLSearchParams(location.search).get("backend") === "staging";
-  const BACKEND_URL = (isLocal && !useStagingFromLocal)
+  // Query override:
+  // ?backend=local   -> force local wrangler
+  // ?backend=staging -> force staging worker
+  // ?backend=prod    -> force production worker
+  const backendParam = typeof URLSearchParams !== "undefined"
+    ? String(new URLSearchParams(location.search).get("backend") || "").toLowerCase()
+    : "";
+  const forcedBackend = backendParam === "local"
     ? LOCAL_WRANGLER
-    : STAGING_BACKEND;
+    : backendParam === "staging"
+      ? STAGING_BACKEND
+      : backendParam === "prod" || backendParam === "production"
+        ? PRODUCTION_BACKEND
+        : "";
+
+  const BACKEND_URL = forcedBackend || (isLocal ? LOCAL_WRANGLER : PRODUCTION_BACKEND);
   window.API_BASE_URL = BACKEND_URL;
 
   // Backwards-compatible fallbacks: presets & AI pakai backend ini bila user belum set di Settings.
