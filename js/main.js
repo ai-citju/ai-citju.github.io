@@ -1048,8 +1048,36 @@ function mountAIGeneratorMain(){
         // Handle status 400 (invalid request)
         if(response.status === 400){
           const errorData = await response.json().catch(()=>({}))
-          showStatus(`❌ ${errorData.error || 'Invalid request - periksa provider name'}`, 'error')
-          aiLog('warn', 'testKey.400', { provider, error: errorData.error })
+          const msg = String(errorData.error || '')
+          const isRegionBlocked = /location is not supported|country|region|territory|geo/i.test(msg)
+          if(isRegionBlocked){
+            let fallbackNote = ''
+            try{
+              const probeController = new AbortController()
+              const probeTimeout = setTimeout(()=> probeController.abort(), 12000)
+              const probeBody = usingServerKey
+                ? { provider, prompt: 'Buat 1 kalimat hook singkat.', allowFallback: true, noCache: true }
+                : { provider, apiKey: key, prompt: 'Buat 1 kalimat hook singkat.', allowFallback: true, noCache: true }
+              const probeRes = await fetch(`${backendURL}/ai/summarize`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                body: JSON.stringify(probeBody),
+                signal: probeController.signal
+              })
+              clearTimeout(probeTimeout)
+              const probeJson = await probeRes.json().catch(()=>({}))
+              const usedProvider = String(probeJson?.meta?.usedProvider || provider)
+              const fallbackUsed = Boolean(probeJson?.meta?.fallbackUsed) || usedProvider !== provider
+              fallbackNote = fallbackUsed
+                ? `\nFallback aktif via provider: ${usedProvider}. Generate tetap bisa dipakai.`
+                : ''
+            }catch(e){ /* ignore fallback probe errors */ }
+            showStatus(`⚠️ Provider ${provider} dibatasi region untuk endpoint model list.${fallbackNote}\nDetail: ${msg}`, 'warn')
+            aiLog('warn', 'testKey.region', { provider, error: msg, backendURL })
+            return
+          }
+          showStatus(`❌ ${msg || 'Invalid request - periksa provider name'}`, 'error')
+          aiLog('warn', 'testKey.400', { provider, error: msg })
           return
         }
         
