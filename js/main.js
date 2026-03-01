@@ -369,6 +369,25 @@ function getServerKeyPresence(provider){
   }catch(e){}
   return null
 }
+function getRegionBlockCacheKey(provider, backendURL){
+  const p = String(provider || '').trim().toLowerCase()
+  const b = String(backendURL || '').trim().toLowerCase()
+  return `ai_models_region_blocked_${p}_${encodeURIComponent(b)}`
+}
+function setModelRegionBlocked(provider, backendURL, blocked){
+  try{
+    const key = getRegionBlockCacheKey(provider, backendURL)
+    if(!key) return
+    if(blocked) sessionStorage.setItem(key, '1')
+    else sessionStorage.removeItem(key)
+  }catch(e){}
+}
+function isModelRegionBlocked(provider, backendURL){
+  try{
+    const key = getRegionBlockCacheKey(provider, backendURL)
+    return !!(key && sessionStorage.getItem(key) === '1')
+  }catch(e){ return false }
+}
 
 function showToast(message, type){
   type = type || 'info'
@@ -2720,6 +2739,15 @@ async function loadModelsFor(prov, modelEl){
     modelEl.insertBefore(note, modelEl.firstChild)
     return
   }
+  if(isModelRegionBlocked(prov, backendURL)){
+    const saved = localStorage.getItem(lsKeyFor(prov)) || recommendedDefaults[prov] || ''
+    if(saved){ const opt = document.createElement('option'); opt.value = saved; opt.textContent = saved; modelEl.appendChild(opt); modelEl.value = saved }
+    const note = document.createElement('option')
+    note.disabled = true
+    note.textContent = '(Model list dibatasi region: gunakan model default / provider lain)'
+    modelEl.insertBefore(note, modelEl.firstChild)
+    return
+  }
 
   try{
     const res = await fetch(`${backendURL}/ai/models`, {
@@ -2736,6 +2764,7 @@ async function loadModelsFor(prov, modelEl){
         setServerKeyPresence(prov, false)
         aiLog('info','modelList.missingKey',{ provider: prov, error: msg })
       }else if(regionBlocked){
+        setModelRegionBlocked(prov, backendURL, true)
         aiLog('info','modelList.regionBlocked',{ provider: prov, error: msg, backendURL })
       }else{
         console.warn('loadModelsFor: backend returned error', json.error)
@@ -2756,6 +2785,7 @@ async function loadModelsFor(prov, modelEl){
     }
     const list = Array.isArray(json?.models) ? json.models : []
     const values = list.map(m => m?.name || m?.id).filter(Boolean)
+    setModelRegionBlocked(prov, backendURL, false)
     if(values.length) setServerKeyPresence(prov, true)
     aiLog('info','modelList',{ provider: prov, count: values.length, sample: values.slice(0,10) })
     const pinnedSet = new Set((pinned[prov] || []).map(String))
