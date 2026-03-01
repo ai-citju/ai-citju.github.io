@@ -4,6 +4,15 @@
 
 window.SettingsUI = {
   init() {
+    const getAuthHeaders = () => {
+      const h = {}
+      try {
+        const token = localStorage.getItem('auth_token')
+        if (token) h.Authorization = 'Bearer ' + token
+      } catch (e) {}
+      return h
+    }
+
     const providerSelect = document.getElementById("ai-provider")
     const apiKeyInput = document.getElementById("ai-api-key")
     const tmdbInput = document.getElementById("tmdb-api-key")
@@ -35,7 +44,7 @@ window.SettingsUI = {
 
     // remember flag (defaults to true)
     const rememberRaw = localStorage.getItem("remember_api_keys")
-    const rememberKeys = rememberRaw === null ? true : String(rememberRaw) === "true"
+    const rememberKeys = String(rememberRaw) === "true"
     if (rememberCheckbox) rememberCheckbox.checked = rememberKeys
 
     // populate TMDB key fallback (main.js uses separate keys)
@@ -104,18 +113,22 @@ window.SettingsUI = {
 
       // save keys either to localStorage (persistent) or sessionStorage (per-window)
       if (remember) {
-        localStorage.setItem("ai_api_key", apiKeyInput.value)
+        localStorage.setItem(`ai_api_key_${providerSelect.value}`, apiKeyInput.value)
+        localStorage.removeItem("ai_api_key")
         localStorage.setItem("ai_provider", providerSelect.value)
         if (tmdbInput) localStorage.setItem("tmdb_api_key", tmdbInput.value)
         // clear any session copies
         sessionStorage.removeItem("ai_api_key")
+        sessionStorage.removeItem(`ai_api_key_${providerSelect.value}`)
         sessionStorage.removeItem("tmdb_api_key")
       } else {
-        sessionStorage.setItem("ai_api_key", apiKeyInput.value)
+        sessionStorage.setItem(`ai_api_key_${providerSelect.value}`, apiKeyInput.value)
+        sessionStorage.removeItem("ai_api_key")
         sessionStorage.setItem("ai_provider", providerSelect.value)
         if (tmdbInput) sessionStorage.setItem("tmdb_api_key", tmdbInput.value)
         // remove persistent copies for safety
         localStorage.removeItem("ai_api_key")
+        localStorage.removeItem(`ai_api_key_${providerSelect.value}`)
         localStorage.removeItem("tmdb_api_key")
       }
 
@@ -174,7 +187,7 @@ window.SettingsUI = {
           `${window.APP_CONFIG.backendURL}/ai/summarize`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...getAuthHeaders() },
             body: JSON.stringify({
               provider: settings.provider,
               apiKey: apiKeyInput.value,

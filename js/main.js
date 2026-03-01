@@ -15,19 +15,7 @@ function getBackendURL(){
   try{
     const stored = String(localStorage.getItem('backend_url') || '').trim()
     const raw = stored || (window.APP_CONFIG && window.APP_CONFIG.backendURL) || (window.AI && window.AI.backendURL) || ''
-    const url = String(raw || '').replace(/\/+$/,'')
-    
-    // Validate URL format
-    if (url) {
-      try {
-        new URL(url)  // Test if valid URL
-        return url
-      } catch (e) {
-        console.warn('[backend] invalid URL:', url)
-        return ''
-      }
-    }
-    return ''
+    return String(raw || '').replace(/\/+$/,'')
   }catch(e){ return '' }
 }
 
@@ -75,9 +63,8 @@ function updateBackendStatusIndicator(elementId){
   const timeoutMs = 8000 // increase timeout to tolerate slow dev worker responses
   const timer = setTimeout(()=> controller.abort(), timeoutMs)
 
-  // Do NOT send Authorization header for health check to avoid CORS preflight.
-  // /ai/debug is intentionally exposed unauthenticated so frontend can poll it.
-  fetch(pingUrl, { method: 'GET', headers: {}, signal: controller.signal })
+  // Send auth header when available because /ai/debug may be protected.
+  fetch(pingUrl, { method: 'GET', headers: getAuthHeaders(), signal: controller.signal })
     .then(async res => {
       clearTimeout(timer)
       // if not ok, treat as reachable but unauthenticated or error
@@ -365,6 +352,21 @@ async function suggestKeywords({useAI=false, provider='openrouter', apiKey='', t
   return extractKeywords(baseText, topN)
 }
 function maskKey(k){ try{ if(!k) return false; const s = String(k); return '***'+s.slice(-4) }catch(e){ return true } }
+function setServerKeyPresence(provider, hasKey){
+  try{
+    if(!provider) return
+    sessionStorage.setItem(`ai_server_key_present_${provider}`, hasKey ? '1' : '0')
+  }catch(e){}
+}
+function getServerKeyPresence(provider){
+  try{
+    if(!provider) return null
+    const raw = sessionStorage.getItem(`ai_server_key_present_${provider}`)
+    if(raw === '1') return true
+    if(raw === '0') return false
+  }catch(e){}
+  return null
+}
 
 function showToast(message, type){
   type = type || 'info'
@@ -381,8 +383,7 @@ function showToast(message, type){
 // Core functions
 // -----------------------
 
-// Try to load full API key from backend (returns full key string or null)
-// This is called during model loading when key is not in localStorage
+// Server-side keys are masked by design. This helper now only checks key existence.
 async function loadApiKeyFromBackend(provider){
   try{
     const backendURL = getBackendURL()
@@ -390,25 +391,21 @@ async function loadApiKeyFromBackend(provider){
     aiLog('info','loadApiKeyFromBackend.request',{ provider, backendURL })
     const controller = new AbortController()
     const timer = setTimeout(()=>controller.abort(), 5000)
-    const res = await fetch(`${backendURL}/ai/get-key?provider=${encodeURIComponent(provider)}&full=true`, { headers: getAuthHeaders(), signal: controller.signal })
+    const res = await fetch(`${backendURL}/ai/get-key?provider=${encodeURIComponent(provider)}`, { headers: getAuthHeaders(), signal: controller.signal })
     clearTimeout(timer)
     if(!res.ok) return null
     const j = await res.json().catch(()=>({}))
     aiLog('info','loadApiKeyFromBackend.response',{ provider, result: j })
+    if(j && typeof j.hasKey === 'boolean'){
+      setServerKeyPresence(provider, !!j.hasKey)
+    }
     if(j && j.apiKey) {
-      const apiKey = String(j.apiKey)
-      // 🆕 BARU: Save to localStorage cache
-      localStorage.setItem(`ai_api_key_${provider}`, apiKey)
-      aiLog('info','loadApiKeyFromBackend.cached',{ provider, cached: true })
-      
-      // 🆕 BARU: Populate input field if exists & empty
-      const inputField = document.getElementById('settingsKey_single')
-      if(inputField && !inputField.value){
-        inputField.value = apiKey
-        aiLog('info','loadApiKeyFromBackend.populateInput',{ provider })
+      // Backend intentionally returns masked value only.
+      if(String(j.apiKey).includes('...')){
+        aiLog('info','loadApiKeyFromBackend.masked',{ provider, hasKey: true })
+        return null
       }
-      
-      return apiKey
+      return String(j.apiKey)
     }
     return null
   }catch(e){ aiLog('warn','loadApiKeyFromBackend.error',{ provider, error: String(e) }); return null }
@@ -422,14 +419,21 @@ async function getKeyForProvider(provider) {
   if (!provider) return null
   
   try {
-    // Priority 1: Check provider-specific localStorage cache (NEW)
+    // Priority 1: provider-specific localStorage cache
     const cachedKey = localStorage.getItem(`ai_api_key_${provider}`)
     if (cachedKey && cachedKey.trim()) {
       aiLog('info','getKeyForProvider.fromCache',{ provider })
       return cachedKey
     }
+
+    // Priority 1b: provider-specific session cache
+    const sessionKey = sessionStorage.getItem(`ai_api_key_${provider}`)
+    if (sessionKey && sessionKey.trim()) {
+      aiLog('info','getKeyForProvider.fromSession',{ provider })
+      return sessionKey
+    }
     
-    // Priority 2: Check ai-settings (OLD)
+    // Priority 2: ai-settings per provider
     try {
       const raw = localStorage.getItem('ai-settings')
       if (raw) {
@@ -437,29 +441,22 @@ async function getKeyForProvider(provider) {
         const k = s?.keys?.[provider]
         if (k && String(k).trim()) {
           aiLog('info','getKeyForProvider.fromSettings',{ provider })
-          // Cache it for next time
           localStorage.setItem(`ai_api_key_${provider}`, k)
           return String(k).trim()
         }
       }
     } catch (e) {}
     
-    // Priority 3: Check general ai_api_key (OLD)
-    const localKey = String(localStorage.getItem('ai_api_key')||'').trim()
-    if (localKey) {
-      aiLog('info','getKeyForProvider.fromLocalKey',{ provider })
-      // Cache it for next time
+    // Priority 3: generic key only when provider matches its owner
+    const genericProvider = String(localStorage.getItem('ai_provider') || sessionStorage.getItem('ai_provider') || '').trim()
+    const localKey = String(localStorage.getItem('ai_api_key') || sessionStorage.getItem('ai_api_key') || '').trim()
+    if (localKey && genericProvider && genericProvider === provider) {
+      aiLog('info','getKeyForProvider.fromGenericMatched',{ provider })
       localStorage.setItem(`ai_api_key_${provider}`, localKey)
       return localKey
     }
     
-    // Priority 4: Auto-load dari backend (NEW + FALLBACK)
-    const backendKey = await loadApiKeyFromBackend(provider)
-    if (backendKey) {
-      aiLog('info','getKeyForProvider.fromBackend',{ provider })
-      return backendKey
-    }
-    
+    // Priority 4: no key in browser; backend may still have per-user key.
     return null
   } catch (e) {
     aiLog('warn','getKeyForProvider.error',{ provider, error: String(e) })
@@ -472,7 +469,6 @@ function mountAIGeneratorMain(){
   try{
     console.debug('mountAIGeneratorMain: entry')
     const root = document.getElementById('aiMainContainer')
-    if(root) try{ root.style.color = ''; root.innerText = 'Mounting AI UI...'; }catch(e){}
     if(!root){ console.error('mountAIGeneratorMain: aiMainContainer not found'); return }
 
     const displayName = (typeof localStorage !== 'undefined' && localStorage.getItem('auth_username')) || 'User'
@@ -486,12 +482,7 @@ function mountAIGeneratorMain(){
           <div class="sidebar-avatar" aria-hidden="true">${esc(profileInitial)}</div>
           <span class="sidebar-username">${esc(displayName)}</span>
         </div>
-`
-  try{ // insert debug banner to track mount progress
-    let dbg = document.getElementById('aiMountDebug')
-    if(!dbg){ dbg = document.createElement('div'); dbg.id = 'aiMountDebug'; dbg.style.fontSize = '12px'; dbg.style.color = '#6a8'; dbg.style.padding = '6px'; dbg.style.background = 'rgba(0,0,0,0.02)'; dbg.style.borderBottom = '1px solid rgba(255,255,255,0.02)'; root.insertBefore(dbg, root.firstChild) }
-    dbg.textContent = 'mount: innerHTML set'
-  }catch(e){ console.warn('mount debug banner insert failed', e) }        <div class="nav-item active" data-action="generator"><svg viewBox="0 0 24 24"><path d="M12 2L2 7v6c0 5 3.7 9.2 9 11 5.3-1.8 9-6 9-11V7l-10-5z"/></svg><span class="nav-label">Generator</span></div>
+        <div class="nav-item active" data-action="generator"><svg viewBox="0 0 24 24"><path d="M12 2L2 7v6c0 5 3.7 9.2 9 11 5.3-1.8 9-6 9-11V7l-10-5z"/></svg><span class="nav-label">Generator</span></div>
         <div class="nav-item" data-action="history"><svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 1 0 9 9h-2a7 7 0 1 1-7-7V3z"/></svg><span class="nav-label">History</span></div>
         <div class="nav-item" data-action="presets"><svg viewBox="0 0 24 24"><path d="M12 7a5 5 0 1 0 5 5 5 5 0 0 0-5-5z"/></svg><span class="nav-label">Presets</span></div>
         <div style="flex:1"></div>
@@ -658,6 +649,13 @@ function mountAIGeneratorMain(){
     presetSel.addEventListener('change', ()=>{
       const key = String(presetSel.value || '').trim()
       try{ updatePresetPreview(key) }catch(e){}
+      try{
+        const btn = document.getElementById('presetDropdownBtn')
+        if(btn){
+          const opt = presetSel.selectedOptions && presetSel.selectedOptions[0]
+          btn.textContent = opt ? opt.textContent : '(Manual - no preset)'
+        }
+      }catch(e){}
       try{ updateCharCounters() }catch(e){}
     })
   }
@@ -760,84 +758,88 @@ function mountAIGeneratorMain(){
     placeholder.innerHTML = `
       <div class="panel settings-page">
         <h2 style="margin-top:0">Settings</h2>
-        <form class="control-pane" onsubmit="event.preventDefault();">
-          <div class="control-group">
-              <div class="control-label" style="display:flex;align-items:center;gap:8px">
-              <label>Backend URL</label>
-              <div id="presetsBackendIndicator" style="margin-left:8px;font-size:12px;color:#6a8;padding:6px 8px;background:rgba(0,40,20,0.3);border-radius:6px;border:1px solid rgba(106,168,136,0.2);display:flex;align-items:center;gap:6px;font-family:monospace">🔴 OFFLINE</div>
-              </div>
-              <div style="display:flex;gap:8px;align-items:center">
-                <div style="display:flex;gap:8px;align-items:center;flex:1">
-                  <input id="settingsBackendURL" class="form-input" type="text" style="flex:1" placeholder="https://your-backend.workers.dev" />
-                  <button id="settingsBackendTest" type="button" class="secondary">Test</button>
-                  <button id="settingsBackendSave" type="button" class="primary">Save</button>
+        <form id="settingsForm" onsubmit="event.preventDefault(); return false;">
+          <div class="control-pane">
+            <div class="control-group">
+                <div class="control-label" style="display:flex;align-items:center;gap:8px">
+                <label>Backend URL</label>
+                <div id="presetsBackendIndicator" style="margin-left:8px;font-size:12px;color:#6a8;padding:6px 8px;background:rgba(0,40,20,0.3);border-radius:6px;border:1px solid rgba(106,168,136,0.2);display:flex;align-items:center;gap:6px;font-family:monospace">🔴 OFFLINE</div>
                 </div>
-                
+                <div style="display:flex;gap:8px;align-items:center">
+                  <div style="display:flex;gap:8px;align-items:center;flex:1">
+                    <input id="settingsBackendURL" class="form-input" type="text" style="flex:1" placeholder="https://your-backend.workers.dev" />
+                    <button type="button" id="settingsBackendTest" class="secondary">Test</button>
+                    <button type="button" id="settingsBackendSave" class="primary">Save</button>
+                  </div>
+                  
+                </div>
+                <div style="font-size:12px;margin-top:6px;color:#c9d0b3">Backend untuk AI dan penyimpanan presets. Lokal (mis. http://127.0.0.1:8787) = simpan di project; external (mis. workers.dev) = simpan di server tersebut.</div>
               </div>
-              <div style="font-size:12px;margin-top:6px;color:#c9d0b3">Backend untuk AI dan penyimpanan presets. Lokal (mis. http://127.0.0.1:8787) = simpan di project; external (mis. workers.dev) = simpan di server tersebut.</div>
-            </div>
+
+              <div class="control-group">
+                <label>Default provider</label>
+                <select id="settingsDefaultProvider" class="form-select">
+                  <option value="gemini">Gemini</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="groq">Groq</option>
+                  <option value="together">Together</option>
+                  <option value="cohere">Cohere</option>
+                  <option value="huggingface">Hugging Face</option>
+                  <option value="deepseek">DeepSeek</option>
+                </select>
+              </div>
+
+               <div class="control-group">
+                 <label id="settingsKeyLabel">API Key</label>
+                 <input id="settingsKey_single" class="form-input" type="password" style="flex:1" placeholder="sk-..." autocomplete="current-password" />
+               </div>
 
             <div class="control-group">
-              <label>Default provider</label>
-              <select id="settingsDefaultProvider" class="form-select">
-                <option value="gemini">Gemini</option>
-                <option value="openai">OpenAI</option>
-                <option value="openrouter">OpenRouter</option>
-                <option value="groq">Groq</option>
-                <option value="together">Together</option>
-                <option value="cohere">Cohere</option>
-                <option value="huggingface">Hugging Face</option>
-                <option value="deepseek">DeepSeek</option>
-              </select>
+             
+              <div style="display:flex;gap:8px;align-items:center">
+                
+                <button type="button" id="settingsShowBtn" class="secondary">Show</button>
+                <button type="button" id="testKey_single" class="primary">Test</button>
+                <button type="button" id="settingsDeleteBtn" class="secondary">Delete from server</button>
+              </div>
+              <div id="settingsServerStatus" style="font-size:12px;margin-top:6px;color:#c9d0b3"></div>
             </div>
 
-             <label id="settingsKeyLabel">API Key</label>
-             <input id="settingsKey_single" class="form-input" type="password" style="flex:1" placeholder="sk-..." />
-
-          <div class="control-group">
-           
-            <div style="display:flex;gap:8px;align-items:center">
-              
-              <button id="settingsShowBtn" type="button" class="secondary">Show</button>
-              <button id="testKey_single" type="button" class="primary">Test</button>
-              <button id="settingsDeleteBtn" type="button" class="secondary">Delete from server</button>
+            <div style="display:flex;gap:10px;align-items:center">
+              <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="settingsRemember" /> Remember API keys</label>
             </div>
-            <div id="settingsServerStatus" style="font-size:12px;margin-top:6px;color:#c9d0b3"></div>
-          </div>
 
-          <div style="display:flex;gap:10px;align-items:center">
-            <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="settingsRemember" /> Remember API keys</label>
-          </div>
+            <div style="display:flex;gap:10px;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid var(--border-color)">
+              <span style="font-size:14px">Theme:</span>
+              <button type="button" id="settingsThemeToggle" class="theme-settings-btn secondary" aria-label="Toggle dark/light mode">
+                <svg class="icon-sun-settings" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none; margin-right:4px;">
+                  <circle cx="12" cy="12" r="5"></circle>
+                  <line x1="12" y1="1" x2="12" y2="3"></line>
+                  <line x1="12" y1="21" x2="12" y2="23"></line>
+                  <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                  <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                  <line x1="1" y1="12" x2="3" y2="12"></line>
+                  <line x1="21" y1="12" x2="23" y2="12"></line>
+                  <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                  <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                </svg>
+                <svg class="icon-moon-settings" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:4px;">
+                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                </svg>
+                <span class="theme-label">Light</span>
+              </button>
+            </div>
 
-          <div style="display:flex;gap:10px;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid var(--border-color)">
-            <span style="font-size:14px">Theme:</span>
-            <button id="settingsThemeToggle" type="button" class="theme-settings-btn secondary" aria-label="Toggle dark/light mode">
-              <svg class="icon-sun-settings" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none; margin-right:4px;">
-                <circle cx="12" cy="12" r="5"></circle>
-                <line x1="12" y1="1" x2="12" y2="3"></line>
-                <line x1="12" y1="21" x2="12" y2="23"></line>
-                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-                <line x1="1" y1="12" x2="3" y2="12"></line>
-                <line x1="21" y1="12" x2="23" y2="12"></line>
-                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-              </svg>
-              <svg class="icon-moon-settings" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:4px;">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-              </svg>
-              <span class="theme-label">Light</span>
-            </button>
-          </div>
+            <div style="display:flex;gap:8px;margin-top:12px">
+              <button type="button" id="settingsSaveBtn" class="primary">Save</button>
+              <button type="button" id="settingsCancelBtn" class="secondary">Close</button>
+            </div>
 
-          <div style="display:flex;gap:8px;margin-top:12px">
-            <button id="settingsSaveBtn" type="button" class="primary">Save</button>
-            <button id="settingsCancelBtn" type="button" class="secondary">Close</button>
+            <div id="settingsStatus" class="status info" style="display:none;margin-top:12px"></div>
           </div>
-
-          <div id="settingsStatus" class="status info" style="display:none;margin-top:12px"></div>
         </form>
-          </div>
+      </div>
     `
 
         // update the backend status indicator now that element exists in Settings
@@ -877,7 +879,7 @@ function mountAIGeneratorMain(){
       const prov = s.provider || 'gemini'
       document.getElementById('settingsDefaultProvider').value = prov
       document.getElementById('settingsKeyLabel').textContent = `API Key for ${prov}`
-      document.getElementById('settingsRemember').checked = remember === null ? true : String(remember) === 'true'
+      document.getElementById('settingsRemember').checked = String(remember) === 'true'
       // delegate loading the key (only call backend if reachable to avoid console errors)
       ;(async ()=>{
         const backendURL = getBackendURL()
@@ -930,17 +932,16 @@ function mountAIGeneratorMain(){
       }
 
       aiLog('info','getKey.request',{ provider, backendURL })
-      // request full key when possible (frontend includes Authorization header)
-      fetch(`${backendURL}/ai/get-key?provider=${encodeURIComponent(provider)}&full=true`, {
+      fetch(`${backendURL}/ai/get-key?provider=${encodeURIComponent(provider)}`, {
         headers: getAuthHeaders()
       })
         .then(r=>r.json())
         .then(j=>{
           aiLog('info','getKey.response',{ provider, result: j })
           try{
-            // if server returned a masked key (fallback) use stored key instead
+            // server returns masked key only; never hydrate full secret from backend
             const serverKey = (!j?.error ? (j.apiKey || '') : '')
-            const useKey = (serverKey && serverKey.includes('...')) ? (s.keys?.[provider] || '') : serverKey || (s.keys?.[provider] || '')
+            const useKey = (serverKey && serverKey.includes('...')) ? (s.keys?.[provider] || '') : (s.keys?.[provider] || '')
             document.getElementById('settingsKey_single').value = useKey
           }catch(e){}
           // Query debug endpoint to show whether KV is bound in this runtime
@@ -950,8 +951,13 @@ function mountAIGeneratorMain(){
             }).then(r2=>r2.json()).then(dj=>{
               const statusEl2 = document.getElementById('settingsServerStatus')
               if(!statusEl2) return
-              if(dj && dj.kvBound) statusEl2.textContent = 'Server: KV bound (keys persisted)'
-              else statusEl2.textContent = 'Server: KV not bound — keys may be ephemeral locally'
+              if(j && j.hasKey) {
+                statusEl2.textContent = 'Server: key tersimpan (masked, tidak bisa ditampilkan)'
+              } else if(dj && dj.kvBound) {
+                statusEl2.textContent = 'Server: KV bound (keys persisted)'
+              } else {
+                statusEl2.textContent = 'Server: KV not bound — keys may be ephemeral locally'
+              }
             }).catch(()=>{})
           }catch(e){}
         }).catch(err=>{ aiLog('error','getKey.error',{ provider, error: String(err) }); try{ document.getElementById('settingsKey_single').value = s.keys?.[provider] || '' }catch(e){} })
@@ -966,11 +972,9 @@ function mountAIGeneratorMain(){
       const input = document.getElementById('settingsKey_single')
       let key = input ? String(input.value||'').trim() : ''
 
-      // If key looks masked (e.g. "abcd..."), try to restore full key from backend
+      // If key looks masked, backend no longer returns full key to frontend.
       if(key && key.includes('...')){
-        const full = await loadApiKeyFromBackend(provider)
-        if(full){ key = String(full).trim(); try{ if(input) input.value = key }catch(e){} }
-        else return showStatus('❌ API key ter-mask — silahkan login atau masukkan ulang API key', 'error')
+        return showStatus('❌ API key ter-mask — masukkan ulang API key untuk test manual', 'error')
       }
 
       if(!key) return showStatus('❌ API key tidak boleh kosong', 'error')
@@ -1105,17 +1109,33 @@ function mountAIGeneratorMain(){
         const j = await res.json().catch(()=>({}))
         aiLog('info','saveKey.response',{ provider, result: j })
         if(res.ok && j?.ok){
-          // save selected provider and key locally according to remember preference
-          saveSettings({ provider, keys: { [provider]: apiKey } })
+          // save selected provider, and persist key locally only when remember enabled
+          if(remember){
+            saveSettings({ provider, keys: { [provider]: apiKey } })
+          } else {
+            saveSettings({ provider })
+            try{
+              const raw = localStorage.getItem('ai-settings')
+              const s = raw ? JSON.parse(raw) : { provider, keys: {} }
+              if(s?.keys && Object.prototype.hasOwnProperty.call(s.keys, provider)){
+                s.keys[provider] = ''
+                localStorage.setItem('ai-settings', JSON.stringify(s))
+              }
+            }catch(e){}
+          }
           try{
             if(remember){
-              localStorage.setItem('ai_api_key', apiKey)
+              localStorage.setItem(`ai_api_key_${provider}`, apiKey)
+              localStorage.removeItem('ai_api_key')
               localStorage.setItem('ai_provider', provider)
+              sessionStorage.removeItem(`ai_api_key_${provider}`)
             }else{
-              sessionStorage.setItem('ai_api_key', apiKey)
+              sessionStorage.setItem(`ai_api_key_${provider}`, apiKey)
+              sessionStorage.removeItem('ai_api_key')
               sessionStorage.setItem('ai_provider', provider)
               // ensure persistent copies removed
               localStorage.removeItem('ai_api_key')
+              localStorage.removeItem(`ai_api_key_${provider}`)
             }
           }catch(e){}
           showStatus('Settings disimpan di backend', 'success')
@@ -1159,10 +1179,7 @@ function mountAIGeneratorMain(){
 
     // delete key from server (if backend bound)
     const delBtn = document.getElementById('settingsDeleteBtn')
-    console.debug('[settings.deleteKey] wiring delete button, found:', !!delBtn)
-    if(delBtn) delBtn.addEventListener('click', ()=> console.debug('[settings.deleteKey] DOM click event fired (early)'))
     delBtn?.addEventListener('click', async ()=>{
-      console.debug('[settings.deleteKey] click handler invoked')
       const provider = document.getElementById('settingsDefaultProvider').value
       // prefer getBackendURL() helper, fallback to globals
       let backendURL = ''
@@ -1189,7 +1206,6 @@ function mountAIGeneratorMain(){
           const targetUrl = `${backendURL}/ai/delete-key?provider=${encodeURIComponent(provider)}`
           const authHeaders = getAuthHeaders()
           const authPresent = !!(authHeaders && (authHeaders.Authorization || authHeaders.authorization))
-          console.debug('[settings.deleteKey] request', { provider, targetUrl, authPresent })
           if(debugEl) debugEl.textContent = `DEBUG: ${targetUrl} (auth: ${authPresent? 'present':'absent'})`
           try{
             res = await fetch(targetUrl, { 
@@ -1200,15 +1216,14 @@ function mountAIGeneratorMain(){
           }catch(fetchErr){
             clearTimeout(to)
             console.error('[settings.deleteKey] fetch error', fetchErr)
-            if(debugEl) debugEl.textContent = 'DEBUG: fetch error: '+String(fetchErr?.message||fetchErr)
+            if(debugEl) debugEl.textContent = 'Error: '+String(fetchErr?.message||fetchErr)
             return showStatus('Gagal menghubungi server: '+String(fetchErr?.message||fetchErr), 'error')
           }
           clearTimeout(to)
 
           let j = {}
           try{ j = await res.json() }catch(e){ j = {} }
-          console.debug('[settings.deleteKey] response', { status: res.status, ok: res.ok, body: j })
-          if(debugEl) debugEl.textContent = 'DEBUG: response '+res.status+' - '+(j && j.error ? j.error : (j && j.ok? 'ok':'no body'))
+          if(debugEl) debugEl.textContent = 'Response '+res.status+' - '+(j && j.error ? j.error : (j && j.ok? 'ok':'no body'))
 
           if(res.ok && j?.ok){
             showStatus('API key dihapus dari server', 'success')
@@ -1221,6 +1236,8 @@ function mountAIGeneratorMain(){
               // remove any persisted/session copies of the active provider key
               try{ localStorage.removeItem('ai_api_key') }catch(e){}
               try{ sessionStorage.removeItem('ai_api_key') }catch(e){}
+              try{ localStorage.removeItem(`ai_api_key_${provider}`) }catch(e){}
+              try{ sessionStorage.removeItem(`ai_api_key_${provider}`) }catch(e){}
               try{ localStorage.removeItem('ai_provider') }catch(e){}
               try{ sessionStorage.removeItem('ai_provider') }catch(e){}
               // propagate to AppSettings if present
@@ -1237,6 +1254,8 @@ function mountAIGeneratorMain(){
               saveSettings(s)
               try{ localStorage.removeItem('ai_api_key') }catch(e){}
               try{ sessionStorage.removeItem('ai_api_key') }catch(e){}
+              try{ localStorage.removeItem(`ai_api_key_${provider}`) }catch(e){}
+              try{ sessionStorage.removeItem(`ai_api_key_${provider}`) }catch(e){}
               try{ localStorage.removeItem('ai_provider') }catch(e){}
               try{ sessionStorage.removeItem('ai_provider') }catch(e){}
               try{ window.AppSettings && typeof window.AppSettings.saveAI === 'function' && window.AppSettings.saveAI(s) }catch(e){}
@@ -1245,7 +1264,7 @@ function mountAIGeneratorMain(){
           }
         }catch(e){ 
           console.error('[settings.deleteKey] error:', e)
-          if(document.getElementById('settingsServerStatus')) document.getElementById('settingsServerStatus').textContent = 'DEBUG error: '+String(e?.message||e)
+          if(document.getElementById('settingsServerStatus')) document.getElementById('settingsServerStatus').textContent = 'Error: '+String(e?.message||e)
           showStatus('Gagal menghapus API key: '+String(e?.message||e), 'error') 
         }
       })()
@@ -2144,13 +2163,20 @@ function mountAIGeneratorMain(){
     const presetNoteId = 'presetControlsNote'
     let presetNote = document.getElementById(presetNoteId)
 
-    if(!key){
+    const normalizedKey = String(key || '').trim().toLowerCase()
+    const isManual = !normalizedKey ||
+      normalizedKey === 'manual' ||
+      normalizedKey === '(manual - no preset)' ||
+      normalizedKey === 'no preset' ||
+      normalizedKey === 'none'
+    if(isManual){
       el.innerHTML = '<em>No preset selected</em>'
       if(presetNote) presetNote.remove()
       try{
         const toneSel = document.getElementById('aiToneSelect'); if(toneSel){ toneSel.disabled = false }
         const kwSel = document.getElementById('aiKeywordSelect'); if(kwSel){ kwSel.disabled = false }
         const varBtn = document.getElementById('aiVariationsBtn'); if(varBtn) varBtn.textContent = 'Buat 3 variasi'
+        try{ localStorage.removeItem(ACTIVE_PRESET_KEY) }catch(e){}
       }catch(e){}
       return
     }
@@ -2524,6 +2550,15 @@ function mountAIGeneratorMain(){
         if(goalEl) goalEl.addEventListener('change', ()=>{ rebuildList() })
       }catch(e){ /* ignore dropdown build errors */ }
     }
+
+    // keep custom button text always in sync with native select value
+    try{
+      const btn = document.getElementById('presetDropdownBtn')
+      if(btn){
+        const opt = sel.selectedOptions && sel.selectedOptions[0]
+        btn.textContent = opt ? opt.textContent : '(Manual - no preset)'
+      }
+    }catch(e){}
   }
 
   // expose update function globally so main can call it
@@ -2538,11 +2573,11 @@ function mountAIGeneratorMain(){
       if(sel){
         if(activeKey && window.PresetsManager.get(activeKey)){
           sel.value = activeKey
-          updatePresetPreview(activeKey)
+          sel.dispatchEvent(new Event('change'))
           const label = (window.PresetsManager.get(activeKey)||{}).label || activeKey
           showToast('Preset "' + label + '" aktif.', 'info')
         } else {
-          updatePresetPreview(sel.value || '')
+          sel.dispatchEvent(new Event('change'))
         }
       }
     }catch(e){}
@@ -2559,7 +2594,7 @@ function mountAIGeneratorMain(){
       const overview = overviewEl ? String(overviewEl.value||'') : ''
       const useAI = !!(useAICheck && useAICheck.checked)
       const provider = document.getElementById('aiProviderSelect')?.value || 'openrouter'
-      const apiKey = (function(){ try{ const raw = localStorage.getItem('ai-settings'); if(raw){ const s = JSON.parse(raw); const p = s?.keys?.[provider]; if(p) return String(p).trim() } }catch(e){} return String(localStorage.getItem('ai_api_key')||'').trim() })()
+      const apiKey = await getKeyForProvider(provider)
       const sug = await suggestKeywords({ useAI, provider, apiKey, title, overview, topN:6 })
       // populate select with suggestions
       if(!kwSelect) return
@@ -2573,57 +2608,28 @@ function mountAIGeneratorMain(){
     })
   }catch(e){}
   console.debug('mountAIGeneratorMain: presets populated')
-  try{ const dbg = document.getElementById('aiMountDebug'); if(dbg) dbg.textContent = 'mount: presets populated' }catch(e){ }
 
-  try{ const dbg = document.getElementById('aiMountDebug'); if(dbg) dbg.textContent = 'mount: done' }catch(e){ }
   console.debug('mountAIGeneratorMain: done')
   }catch(err){ console.error('mountAIGeneratorMain: unexpected error', err); throw err }
+
 
 }
 
 // Auto-mount fallback: ensure generator mounts on page load if container exists
 (function(){
-  function reportMountError(err){
-    try{
-      const root = document.getElementById('aiMainContainer')
-      const msg = String(err && err.message ? err.message : err)
-      if(root){ root.style.color = '#c66'; root.innerText = 'Error mounting AI UI: ' + msg }
-      console.error('mountAIGeneratorMain ERROR', err)
-    }catch(e){ console.error('reportMountError failed', e) }
-  }
-
   function tryMount(){
     if(window.__ai_mounted__) return
     try{
-      const root = document.getElementById('aiMainContainer')
-      if(root) try{ root.innerText = 'Attempting auto-mount...'; }catch(e){}
-      const hasContainer = !!(root || document.getElementById('aiMainHeader'))
+      const hasContainer = !!(document.getElementById('aiMainContainer') || document.getElementById('aiMainHeader'))
       const ready = document.readyState === 'complete' || document.readyState === 'interactive'
       if(ready && hasContainer){
-        try{ mountAIGeneratorMain(); window.__ai_mounted__ = true; console.debug('auto-mount: mountAIGeneratorMain invoked') }catch(e){ console.warn('auto-mount failed', e); reportMountError(e) }
+        try{ mountAIGeneratorMain(); window.__ai_mounted__ = true; console.debug('auto-mount: mountAIGeneratorMain invoked') }catch(e){ console.warn('auto-mount failed', e) }
       }
-    }catch(e){ reportMountError(e) }
+    }catch(e){}
   }
-
-  // Try immediate mount (aggressive) then also on DOMContentLoaded and shortly after
-  try{ tryMount() }catch(e){ reportMountError(e) }
   document.addEventListener('DOMContentLoaded', tryMount)
+  // Try again shortly after in case script executed after DOMContentLoaded
   setTimeout(tryMount, 300)
-
-  // SECONDARY ATTEMPT: in case onload handlers overwrote the diagnostics text earlier
-  setTimeout(()=>{
-    try{
-      const root = document.getElementById('aiMainContainer')
-      if(root){
-        root.innerText += ' · Post-load mount attempt...'
-      }
-      if(!window.__ai_mounted__){
-        try{ mountAIGeneratorMain(); window.__ai_mounted__ = true; console.debug('post-load: mountAIGeneratorMain invoked') }catch(e){ reportMountError(e) }
-      } else {
-        console.debug('post-load: already mounted')
-      }
-    }catch(e){ reportMountError(e) }
-  }, 600)
 })();
 
 // Load models for a provider and populate a given model <select>
@@ -2634,7 +2640,7 @@ async function loadModelsFor(prov, modelEl){
   const pinned = {
     gemini: ['models/gemini-2.5-flash', 'models/gemini-2.5-flash-lite'],
     openai: ['gpt-4o-mini'],
-    openrouter: ['meta-llama/llama-3-8b-instruct'],
+    openrouter: ['meta-llama/llama-3.1-8b-instruct:free'],
     groq: ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile', 'mixtral-8x7b-32768'],
     together: ['meta-llama/Llama-3-70b-chat-hf', 'mistralai/Mixtral-8x7B-Instruct-v0.1', 'deepseek-ai/DeepSeek-V3'],
     cohere: ['command-r-plus-08-2024', 'command-r7b-12-2024', 'command-a-03-2025'],
@@ -2648,23 +2654,12 @@ async function loadModelsFor(prov, modelEl){
     modelEl.appendChild(opt)
   })
 
-  const getKeyForProvider = async (p) => {
-    try{
-      const raw = localStorage.getItem('ai-settings')
-      if(raw){ const s = JSON.parse(raw); const k = s?.keys?.[p]; if(k) return String(k).trim() }
-    }catch(e){}
-    const localKey = String(localStorage.getItem('ai_api_key')||'').trim()
-    if(localKey) return localKey
-    // if no key in localStorage, try to load from backend (user just logged in, key stored server-side)
-    try{ const backendKey = await loadApiKeyFromBackend(p); if(backendKey) return backendKey }catch(e){}
-    return ''
-  }
   const lsKeyFor = (p) => `ai_model_${p}`
-  const recommendedDefaults = { gemini: 'models/gemini-2.5-flash', openai: 'gpt-4o-mini', openrouter: 'meta-llama/llama-3-8b-instruct', groq: 'llama-3.1-8b-instant', together: 'meta-llama/Llama-3-70b-chat-hf', cohere: 'command-r-plus-08-2024', huggingface: 'meta-llama/Llama-3-70b-chat-hf', deepseek: 'deepseek-chat' }
+  const recommendedDefaults = { gemini: 'models/gemini-2.5-flash', openai: 'gpt-4o-mini', openrouter: 'meta-llama/llama-3.1-8b-instruct:free', groq: 'llama-3.1-8b-instant', together: 'meta-llama/Llama-3-70b-chat-hf', cohere: 'command-r-plus-08-2024', huggingface: 'meta-llama/Llama-3-70b-chat-hf', deepseek: 'deepseek-chat' }
 
   const key = await getKeyForProvider(prov)
   const backendURL = getBackendURL()
-  if(!key || !backendURL){
+  if(!backendURL){
     const saved = localStorage.getItem(lsKeyFor(prov)) || recommendedDefaults[prov] || ''
     if(saved){ const opt = document.createElement('option'); opt.value = saved; opt.textContent = saved; modelEl.appendChild(opt); modelEl.value = saved }
     return
@@ -2687,22 +2682,53 @@ async function loadModelsFor(prov, modelEl){
     return
   }
 
+  let hasServerKey = getServerKeyPresence(prov)
+  if(hasServerKey == null){
+    try{ await loadApiKeyFromBackend(prov) }catch(e){}
+    hasServerKey = getServerKeyPresence(prov)
+  }
+  const hasAnyKey = !!String(key || '').trim() || hasServerKey === true
+  if(!hasAnyKey){
+    const saved = localStorage.getItem(lsKeyFor(prov)) || recommendedDefaults[prov] || ''
+    if(saved){ const opt = document.createElement('option'); opt.value = saved; opt.textContent = saved; modelEl.appendChild(opt); modelEl.value = saved }
+    const note = document.createElement('option')
+    note.disabled = true
+    note.textContent = '(Set API key di Settings untuk lihat model lengkap)'
+    modelEl.insertBefore(note, modelEl.firstChild)
+    return
+  }
+
   try{
-    const res = await fetch(`${backendURL}/ai/models?provider=${encodeURIComponent(prov)}&apiKey=${encodeURIComponent(key)}`, {
-      headers: getAuthHeaders()
+    const res = await fetch(`${backendURL}/ai/models`, {
+      method: 'POST',
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(key ? { provider: prov, apiKey: key } : { provider: prov })
     })
     const json = await res.json().catch(()=>({}))
     if(json?.error){
-      console.warn('loadModelsFor: backend returned error', json.error)
+      const msg = String(json.error || '')
+      const missingKey = /missing api key/i.test(msg)
+      if(missingKey){
+        setServerKeyPresence(prov, false)
+        aiLog('info','modelList.missingKey',{ provider: prov, error: msg })
+      }else{
+        console.warn('loadModelsFor: backend returned error', json.error)
+      }
       // show a friendly fallback option and return
       const saved = localStorage.getItem(lsKeyFor(prov)) || recommendedDefaults[prov] || ''
       if(saved){ const opt = document.createElement('option'); opt.value = saved; opt.textContent = saved; modelEl.appendChild(opt); modelEl.value = saved }
       // also add a disabled option explaining the failure
-      const note = document.createElement('option'); note.disabled = true; note.textContent = '(Could not fetch models: ' + String(json.error).slice(0,120) + ')'; modelEl.insertBefore(note, modelEl.firstChild)
+      const note = document.createElement('option')
+      note.disabled = true
+      note.textContent = missingKey
+        ? '(Key belum tersedia: gunakan model default dulu)'
+        : '(Could not fetch models: ' + msg.slice(0,120) + ')'
+      modelEl.insertBefore(note, modelEl.firstChild)
       return
     }
     const list = Array.isArray(json?.models) ? json.models : []
     const values = list.map(m => m?.name || m?.id).filter(Boolean)
+    if(values.length) setServerKeyPresence(prov, true)
     aiLog('info','modelList',{ provider: prov, count: values.length, sample: values.slice(0,10) })
     const pinnedSet = new Set((pinned[prov] || []).map(String))
     values.filter(v => !pinnedSet.has(String(v))).forEach(v=>{
@@ -2735,6 +2761,181 @@ function formatAudioDisplay(audio){
   }catch(e){ return '' }
 }
 function formatAudioJson(audio){ try{ return JSON.stringify(audio || {}, null, 2) }catch(e){ return '' } }
+
+function toIntInRange(value, fallback, min, max){
+  const n = Number(value)
+  if(!Number.isFinite(n)) return fallback
+  return Math.min(max, Math.max(min, Math.floor(n)))
+}
+
+function truncateWords(text, maxWords){
+  const words = String(text || '').trim().split(/\s+/).filter(Boolean)
+  if(!maxWords || words.length <= maxWords) return words.join(' ')
+  return words.slice(0, maxWords).join(' ')
+}
+
+function normalizeHashtags(value, limit){
+  let list = []
+  if(Array.isArray(value)){
+    list = value
+  } else if (typeof value === 'string') {
+    list = value.split(/[\s,;\n]+/g).filter(Boolean)
+  }
+  const seen = new Set()
+  const out = []
+  for(const raw of list){
+    const clean = String(raw || '').trim().replace(/^#+/, '').replace(/[^\w\-]/g, '')
+    if(!clean) continue
+    const normalized = '#' + clean
+    const key = normalized.toLowerCase()
+    if(seen.has(key)) continue
+    seen.add(key)
+    out.push(normalized)
+    if(out.length >= limit) break
+  }
+  return out
+}
+
+function normalizeGeneratedPayload(parsed, { maxWords = 120, hashtagCount = 10 } = {}){
+  const src = (parsed && typeof parsed === 'object') ? parsed : {}
+  const asText = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim()
+  const audioSrc = (src.audio && typeof src.audio === 'object') ? src.audio : {}
+  return {
+    title: asText(src.title),
+    description: truncateWords(asText(src.description), maxWords),
+    hashtags: normalizeHashtags(src.hashtags, hashtagCount),
+    hook: asText(src.hook),
+    narratorScript: asText(src.narratorScript),
+    audio: {
+      style: asText(audioSrc.style),
+      mood: asText(audioSrc.mood),
+      genre: asText(audioSrc.genre),
+      suggestion: asText(audioSrc.suggestion),
+      length: asText(audioSrc.length)
+    }
+  }
+}
+
+function buildVariationFingerprint(parsed){
+  const p = normalizeGeneratedPayload(parsed || {}, { maxWords: 180, hashtagCount: 20 })
+  const tags = Array.isArray(p.hashtags) ? p.hashtags.join(' ') : ''
+  return `${p.title} ${p.hook} ${p.description} ${p.narratorScript} ${tags}`
+    .toLowerCase()
+    .replace(/[^a-z0-9#\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function looksLikeProviderErrorText(text){
+  const lower = String(text || '').toLowerCase()
+  if(!lower) return true
+  return (
+    lower.includes('unauthorized') ||
+    lower.includes('forbidden') ||
+    lower.includes('user not found') ||
+    lower.includes('account not found') ||
+    lower.includes('invalid credential') ||
+    lower.includes('no endpoints found') ||
+    lower.includes('model not found') ||
+    lower.includes('model is not available') ||
+    lower.includes('quota') ||
+    lower.includes('rate limit') ||
+    lower.includes('token') ||
+    lower.includes('api key') ||
+    lower.includes('provider error') ||
+    lower.includes('request failed') ||
+    lower.includes('timeout')
+  )
+}
+
+function countWords(text){
+  return String(text || '').trim().split(/\s+/).filter(Boolean).length
+}
+
+function containsCTA(text){
+  const t = String(text || '').toLowerCase()
+  return /(follow|subscribe|save|share|comment|klik|cek|beli|order|join|kunjungi|lihat di bio|dm)/.test(t)
+}
+
+function evaluateGeneratedPayloadQuality(parsed, { hashtagCount = 10, maxWords = 120 } = {}){
+  const p = parsed && typeof parsed === 'object' ? parsed : {}
+  const issues = []
+  let score = 100
+
+  const title = String(p.title || '').trim()
+  const desc = String(p.description || '').trim()
+  const hook = String(p.hook || '').trim()
+  const narrator = String(p.narratorScript || '').trim()
+  const tags = Array.isArray(p.hashtags) ? p.hashtags : []
+
+  if(!title){ score -= 20; issues.push('title kosong') }
+  if(!hook || countWords(hook) < 4){ score -= 20; issues.push('hook kurang kuat/minimal 4 kata') }
+  if(!desc){ score -= 25; issues.push('description kosong') }
+  const descWords = countWords(desc)
+  if(desc && descWords < 12){ score -= 15; issues.push('description terlalu pendek (<12 kata)') }
+  if(desc && maxWords && descWords > maxWords){ score -= 10; issues.push(`description melebihi ${maxWords} kata`) }
+
+  const maxTags = Math.max(1, Number(hashtagCount || 10))
+  const minTags = Math.min(3, maxTags)
+  if(tags.length < minTags){ score -= 10; issues.push(`hashtags kurang dari ${minTags}`) }
+  if(tags.length > maxTags){ score -= 10; issues.push(`hashtags melebihi ${maxTags}`) }
+
+  if(!containsCTA(`${desc}\n${narrator}`)){ score -= 15; issues.push('CTA tidak terdeteksi') }
+
+  return { score: Math.max(0, score), issues, descWords, hashtags: tags.length }
+}
+
+function buildQualityReprompt(basePrompt, quality){
+  const issueText = (quality?.issues || []).join('; ') || 'Perbaiki hook, CTA, dan kepatuhan format.'
+  return `${basePrompt}
+
+QUALITY FIX REQUIRED:
+- Perbaiki kualitas output agar lebih conversion-ready.
+- Wajib hook kuat di 3 detik pertama.
+- Wajib CTA jelas.
+- Patuhi batas kata description dan jumlah hashtag.
+- Isu yang harus diperbaiki: ${issueText}
+
+Return JSON saja, tanpa markdown atau penjelasan tambahan.`.trim()
+}
+
+let _generateBusy = false
+let _generateBusyTimer = null
+function setGenerateButtonsBusy(isBusy){
+  _generateBusy = !!isBusy
+  const genBtn = document.getElementById('aiGenerateBtn')
+  const varBtn = document.getElementById('aiVariationsBtn')
+  if(genBtn){
+    if(isBusy){
+      if(!genBtn.dataset.prevLabel) genBtn.dataset.prevLabel = genBtn.textContent || 'Generate Content'
+      genBtn.disabled = true
+      genBtn.textContent = 'Generating...'
+    }else{
+      genBtn.disabled = false
+      genBtn.textContent = genBtn.dataset.prevLabel || 'Generate Content'
+      delete genBtn.dataset.prevLabel
+    }
+  }
+  if(varBtn){
+    if(isBusy){
+      if(!varBtn.dataset.prevLabel) varBtn.dataset.prevLabel = varBtn.textContent || 'Buat 3 variasi'
+      varBtn.disabled = true
+      varBtn.textContent = 'Generating...'
+    }else{
+      varBtn.disabled = false
+      varBtn.textContent = varBtn.dataset.prevLabel || 'Buat 3 variasi'
+      delete varBtn.dataset.prevLabel
+    }
+  }
+  if(isBusy){
+    try{ if(_generateBusyTimer) clearTimeout(_generateBusyTimer) }catch(e){}
+    _generateBusyTimer = setTimeout(()=> setGenerateButtonsBusy(false), 90000)
+  }else{
+    try{ if(_generateBusyTimer) clearTimeout(_generateBusyTimer) }catch(e){}
+    _generateBusyTimer = null
+  }
+}
+
 async function generateFromMain(){
   const title = (document.getElementById('aiMainTitle')?.value || '').trim()
   const overview = (document.getElementById('aiMainOverview')?.value || '').trim()
@@ -2742,168 +2943,201 @@ async function generateFromMain(){
     showToast('Isi minimal Title atau Overview untuk generate.', 'error')
     return
   }
-
-  // 🆕 LOADING STATE
-  const btn = document.getElementById('aiGenerateBtn')
-  const btnOriginalLabel = btn?.textContent || 'Generate'
-  if (btn) {
-    btn.disabled = true
-    btn.textContent = '⏳ Generating...'
+  if(_generateBusy){
+    showToast('Generate sedang berjalan, tunggu selesai.', 'info')
+    return
   }
 
-  try {
-    const lang = document.getElementById('aiLangSelect')?.value || 'id'
-    const prov = document.getElementById('aiProviderSelect')?.value || 'gemini'
-    const model = document.getElementById('aiModelSelect')?.value || ''
-    
-    // 🆕 BARU: Use async getKeyForProvider with auto-load fallback
-    let apiKey = await getKeyForProvider(prov)
-    
-    // 🆕 BARU: Retry once if failed
-    if (!apiKey) {
-      showToast('Loading API key dari backend...', 'info')
-      apiKey = await loadApiKeyFromBackend(prov)
+  const lang = document.getElementById('aiLangSelect')?.value || 'id'
+  const prov = document.getElementById('aiProviderSelect')?.value || 'gemini'
+  const model = document.getElementById('aiModelSelect')?.value || ''
+  
+  // 🆕 BARU: Use async getKeyForProvider with auto-load fallback
+  let apiKey = await getKeyForProvider(prov)
+  
+  // Optional lookup (backend only returns masked key). Kept for status checks.
+  if (!apiKey) {
+    try{ await loadApiKeyFromBackend(prov) }catch(e){}
+  }
+  
+  const platformEl = document.getElementById('aiPlatformSelect')
+  const platforms = platformEl ? [platformEl.value] : ['youtube']
+  const { tone } = getEffectiveToneAndKeywords()
+  const keywords = getSelectedKeywords()
+  let presetInstructions = ''
+  let presetObj = null
+  try{
+    const presetSel = document.getElementById('aiPresetSelect')
+    const presetKey = presetSel ? String(presetSel.value||'').trim() : ''
+    if(presetKey){
+      presetObj = window.PresetsManager.get(presetKey)
+      if(presetObj) presetInstructions = (window.PresetsManager.buildPresetInstructions && window.PresetsManager.buildPresetInstructions(presetObj)) || ''
     }
-    
-    const platformEl = document.getElementById('aiPlatformSelect')
-    const platforms = platformEl ? [platformEl.value] : ['youtube']
-    const { tone } = getEffectiveToneAndKeywords()
-    const keywords = getSelectedKeywords()
-    let presetInstructions = ''
-    let presetObj = null
-    try{
-      const presetSel = document.getElementById('aiPresetSelect')
-      const presetKey = presetSel ? String(presetSel.value||'').trim() : ''
-      if(presetKey){
-        presetObj = window.PresetsManager.get(presetKey)
-        if(presetObj) presetInstructions = (window.PresetsManager.buildPresetInstructions && window.PresetsManager.buildPresetInstructions(presetObj)) || ''
-      }
-    }catch(e){}
+  }catch(e){}
 
-    const panel = document.getElementById('aiResultPanel')
-    panel.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:24px;color:#888"><span class="spinner" style="display:inline-block;width:20px;height:20px;border:2px solid rgba(255,255,255,0.2);border-top-color:#0072ff;border-radius:50%;animation:genco-spin 0.8s linear infinite"></span> Generating...</div>'
-    if(!document.getElementById('genco-spinner-style')){
-      const style = document.createElement('style')
-      style.id = 'genco-spinner-style'
-      style.textContent = '@keyframes genco-spin { to { transform: rotate(360deg); } }'
-      document.head.appendChild(style)
-    }
+  const panel = document.getElementById('aiResultPanel')
+  panel.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:24px;color:#888"><span class="spinner" style="display:inline-block;width:20px;height:20px;border:2px solid rgba(255,255,255,0.2);border-top-color:#0072ff;border-radius:50%;animation:genco-spin 0.8s linear infinite"></span> Generating...</div>'
+  setGenerateButtonsBusy(true)
+  if(!document.getElementById('genco-spinner-style')){
+    const style = document.createElement('style')
+    style.id = 'genco-spinner-style'
+    style.textContent = '@keyframes genco-spin { to { transform: rotate(360deg); } }'
+    document.head.appendChild(style)
+  }
 
-    const extractJson = (txt) => { const m = String(txt||'').match(/\{[\s\S]*\}/); if(!m) return null; try{ return JSON.parse(m[0]) }catch(e){ return null } }
-    const forceJsonPrompt = (basePrompt) => `${basePrompt}\n\nIMPORTANT: Return ONLY valid JSON. No markdown, no explanations. If you cannot, output {"title":"","description":"","hashtags":[],"hook":"","narratorScript":""} only.`.trim()
+  const extractJson = (txt) => { const m = String(txt||'').match(/\{[\s\S]*\}/); if(!m) return null; try{ return JSON.parse(m[0]) }catch(e){ return null } }
+  const forceJsonPrompt = (basePrompt) => `${basePrompt}\n\nIMPORTANT: Return ONLY valid JSON. No markdown, no explanations. If you cannot, output {"title":"","description":"","hashtags":[],"hook":"","narratorScript":""} only.`.trim()
 
-    try{
-      if(!apiKey) throw new Error('AI API key is empty for selected provider (set it in Settings, then Save)')
-      const results = []
+  try{
+    const results = []
+    const maxWords = toIntInRange(presetObj?.maxWords, 120, 30, 500)
+    const hashtagCount = toIntInRange(presetObj?.hashtagCount, 10, 1, 30)
 
-      for(const platform of (platforms.length?platforms:['youtube'])){
-        aiLog('info','generate.request.prepare',{ provider: prov, model, lang, platform, title, overview, keywords, tone, apiKeyPresent: !!apiKey, apiKeyMasked: maskKey(apiKey) })
-        let prompt = buildFullPrompt({ title, overview, platform, lang, preset: presetObj, tone: tone || 'neutral', keywords, presetInstructions })
-        // if preset requests audio preferences, append explicit audio instruction
-        try{
-          if(presetObj && (presetObj.audioStyle || presetObj.musicMood || presetObj.audioGenre || presetObj.musicSuggestion || presetObj.audioLength)){
-            prompt += '\n\nIMPORTANT: If applicable include an "audio" object in the JSON with keys: "style","mood","genre","suggestion","length". Use concise phrases.'
-          }
-        }catch(e){}
-
-        let raw = null
-        aiLog('debug','generate.prompt',{ prompt })
-        const start = performance.now()
-        try{
-          raw = await window.AI.generate({ provider: prov, apiKey, prompt, model })
-          const duration = Math.round(performance.now() - start)
-          aiLog('info','generate.response',{ platform, durationMs: duration, rawLength: String(raw||'').length })
-        }catch(e){ raw = String(e?.message||e); aiLog('error','generate.error',{ platform, error: String(e) }) }
-
-        let parsed = extractJson(String(raw || ''))
-        if(!parsed){
-          try{ const reprompt = forceJsonPrompt(prompt); const raw2 = await window.AI.generate({ provider: prov, apiKey, prompt: reprompt, model }); parsed = extractJson(raw2); aiLog('info','generate.reprompt',{ platform, repromptUsed: true }) }catch(e){ aiLog('error','generate.reprompt.error',{ platform, error: String(e) }) }
+    for(const platform of (platforms.length?platforms:['youtube'])){
+      aiLog('info','generate.request.prepare',{ provider: prov, model, lang, platform, title, overview, keywords, tone, apiKeyPresent: !!apiKey, apiKeyMasked: maskKey(apiKey) })
+      let prompt = buildFullPrompt({ title, overview, platform, lang, preset: presetObj, tone: tone || 'neutral', keywords, presetInstructions })
+      // if preset requests audio preferences, append explicit audio instruction
+      try{
+        if(presetObj && (presetObj.audioStyle || presetObj.musicMood || presetObj.audioGenre || presetObj.musicSuggestion || presetObj.audioLength)){
+          prompt += '\n\nIMPORTANT: If applicable include an "audio" object in the JSON with keys: "style","mood","genre","suggestion","length". Use concise phrases.'
         }
+      }catch(e){}
 
-        if(!parsed) parsed = { title: '', description: String(raw||'').slice(0,800), hashtags: [], hook: '', narratorScript: '' }
-        if(!parsed.hook) parsed.hook = ''
-        if(!parsed.narratorScript) parsed.narratorScript = ''
-        // Ensure audio object present when preset suggests audio preferences
+      let raw = null
+      let firstCallErr = null
+      aiLog('debug','generate.prompt',{ prompt })
+      const start = performance.now()
+      try{
+        raw = await window.AI.generate({ provider: prov, apiKey: apiKey || "", prompt, model, noCache: true })
+        const duration = Math.round(performance.now() - start)
+        aiLog('info','generate.response',{ platform, durationMs: duration, rawLength: String(raw||'').length })
+      }catch(e){
+        firstCallErr = String(e?.message || e)
+        raw = ''
+        aiLog('error','generate.error',{ platform, error: firstCallErr })
+      }
+
+      let parsed = extractJson(String(raw || ''))
+      const shouldReprompt = !parsed && !firstCallErr && String(raw || '').trim() && !looksLikeProviderErrorText(raw)
+      if(shouldReprompt){
         try{
-          if(!parsed) parsed = {}
-          if(!parsed.audio && presetObj && (presetObj.audioStyle || presetObj.musicMood || presetObj.audioGenre || presetObj.musicSuggestion || presetObj.audioLength)){
-            parsed.audio = {
-              style: (parsed.audio && parsed.audio.style) || presetObj.audioStyle || '',
-              mood: (parsed.audio && parsed.audio.mood) || presetObj.musicMood || '',
-              genre: (parsed.audio && parsed.audio.genre) || presetObj.audioGenre || '',
-              suggestion: (parsed.audio && parsed.audio.suggestion) || presetObj.musicSuggestion || '',
-              length: (parsed.audio && parsed.audio.length) || presetObj.audioLength || ''
+          const reprompt = forceJsonPrompt(prompt)
+          const raw2 = await window.AI.generate({ provider: prov, apiKey: apiKey || "", prompt: reprompt, model, noCache: true })
+          parsed = extractJson(raw2)
+          aiLog('info','generate.reprompt',{ platform, repromptUsed: true })
+        }catch(e){
+          aiLog('error','generate.reprompt.error',{ platform, error: String(e) })
+        }
+      }
+
+      if(!parsed) parsed = { title: '', description: String(raw||'').slice(0,800), hashtags: [], hook: '', narratorScript: '' }
+      parsed = normalizeGeneratedPayload(parsed, { maxWords, hashtagCount })
+      if(firstCallErr && !parsed.description){
+        parsed.description = String(firstCallErr || '').slice(0, 240)
+      }
+
+      const likelyProviderError = looksLikeProviderErrorText(firstCallErr || raw)
+      const qualityBefore = evaluateGeneratedPayloadQuality(parsed, { maxWords, hashtagCount })
+      if(!firstCallErr && !likelyProviderError && qualityBefore.score < 70){
+        try{
+          const qualityPrompt = buildQualityReprompt(prompt, qualityBefore)
+          const rawQ = await window.AI.generate({ provider: prov, apiKey: apiKey || "", prompt: qualityPrompt, model, noCache: true })
+          const parsedQ = extractJson(rawQ)
+          if(parsedQ){
+            const normalizedQ = normalizeGeneratedPayload(parsedQ, { maxWords, hashtagCount })
+            const qualityAfter = evaluateGeneratedPayloadQuality(normalizedQ, { maxWords, hashtagCount })
+            if(qualityAfter.score > qualityBefore.score){
+              parsed = normalizedQ
+              aiLog('info','generate.quality.regen',{ platform, before: qualityBefore, after: qualityAfter })
+            }else{
+              aiLog('debug','generate.quality.keepOriginal',{ platform, before: qualityBefore, after: qualityAfter })
             }
           }
-        }catch(e){ /* ignore */ }
-        aiLog('info','generate.parsed',{ platform, parsed })
-        results.push({ platform, parsed })
+        }catch(e){
+          aiLog('warn','generate.quality.regen.error',{ platform, error: String(e) })
+        }
       }
+      // Ensure audio object present when preset suggests audio preferences
+      try{
+        if(presetObj && (presetObj.audioStyle || presetObj.musicMood || presetObj.audioGenre || presetObj.musicSuggestion || presetObj.audioLength)){
+          parsed.audio = parsed.audio || {}
+          parsed.audio = {
+            style: (parsed.audio && parsed.audio.style) || presetObj.audioStyle || '',
+            mood: (parsed.audio && parsed.audio.mood) || presetObj.musicMood || '',
+            genre: (parsed.audio && parsed.audio.genre) || presetObj.audioGenre || '',
+            suggestion: (parsed.audio && parsed.audio.suggestion) || presetObj.musicSuggestion || '',
+            length: (parsed.audio && parsed.audio.length) || presetObj.audioLength || ''
+          }
+        }
+      }catch(e){ /* ignore */ }
+      aiLog('info','generate.parsed',{ platform, parsed })
+      results.push({ platform, parsed })
+    }
 
-      const esc = (s)=> String(s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-      const batchId = Date.now()
-      panel.innerHTML = '<div style="margin-bottom:8px"><strong>Results</strong></div>'
-      results.forEach(({ platform, parsed })=>{
-        const idSafe = `aiRes_${platform}`
-        const feedbackId = `${batchId}_${platform}`
-        const card = document.createElement('div')
-        card.style.borderTop = '1px solid rgba(255,255,255,0.04)'
-        card.style.paddingTop = '10px'
-        card.style.marginTop = '10px'
-        card.innerHTML = `
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap: wrap;gap:12px">
-            <div style="display:flex;gap:20px;">
-              <div style="display:flex;align-items:center;gap:12px">
-                <span style="background:rgba(255,255,255,0.03);padding:4px 8px;border-radius:6px;font-size:12px;text-transform:capitalize">${platform}</span>
-              </div>
-              <div class="feedback-group" style="display:flex;gap:6px">
-                <button data-feedback-id="${feedbackId}" data-feedback-rating="good" style="min-height: 30px;padding:6px 10px;border-radius:6px;font-size:12px">Bagus</button>
-                <button data-feedback-id="${feedbackId}" data-feedback-rating="bad" style="min-height: 30px;padding:6px 10px;border-radius:6px;font-size:12px">Kurang</button>
-              </div>
-              </div>
-               <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-              <div class="copy-group" style="display:flex;gap:6px;flex-wrap:wrap">
-                <button data-copy-all="${idSafe}" style="min-height: 30px;padding:4px;border-radius:6px">Copy all</button>
-                <button data-copy-caption="${idSafe}" style="min-height: 30px;padding:4px;border-radius:6px">Copy main</button>
-                <button data-copy-target="${idSafe}_title" style="min-height: 30px;padding:4px;border-radius:6px">Copy Title</button>
-                <button data-copy-target="${idSafe}_desc" style="min-height: 30px;padding:4px;border-radius:6px">Copy Desc</button>
-                <button data-copy-target="${idSafe}_hook" style="min-height: 30px;padding:4px;border-radius:6px">Copy Hook</button>
-                <button data-copy-target="${idSafe}_narrator" style="min-height: 30px;padding:4px;border-radius:6px">Copy Script</button>
-                <button data-copy-target="${idSafe}_tags" style="min-height: 30px;padding:4px;border-radius:6px">Copy Tags</button>
-                <button data-copy-audio="${idSafe}" style="min-height: 30px;padding:4px;border-radius:6px">Copy Audio</button>
-              </div>
+    const esc = (s)=> String(s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    const batchId = Date.now()
+    panel.innerHTML = '<div style="margin-bottom:8px"><strong>Results</strong></div>'
+    results.forEach(({ platform, parsed })=>{
+      const idSafe = `aiRes_${platform}`
+      const feedbackId = `${batchId}_${platform}`
+      const card = document.createElement('div')
+      card.style.borderTop = '1px solid rgba(255,255,255,0.04)'
+      card.style.paddingTop = '10px'
+      card.style.marginTop = '10px'
+      card.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap: wrap;gap:12px">
+          <div style="display:flex;gap:20px;">
+            <div style="display:flex;align-items:center;gap:12px">
+              <span style="background:rgba(255,255,255,0.03);padding:4px 8px;border-radius:6px;font-size:12px;text-transform:capitalize">${platform}</span>
+            </div>
+            <div class="feedback-group" style="display:flex;gap:6px">
+              <button data-feedback-id="${feedbackId}" data-feedback-rating="good" style="min-height: 30px;padding:6px 10px;border-radius:6px;font-size:12px">Bagus</button>
+              <button data-feedback-id="${feedbackId}" data-feedback-rating="bad" style="min-height: 30px;padding:6px 10px;border-radius:6px;font-size:12px">Kurang</button>
+            </div>
+            </div>
+             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+            <div class="copy-group" style="display:flex;gap:6px;flex-wrap:wrap">
+              <button data-copy-all="${idSafe}" style="min-height: 30px;padding:4px;border-radius:6px">Copy all</button>
+              <button data-copy-caption="${idSafe}" style="min-height: 30px;padding:4px;border-radius:6px">Copy main</button>
+              <button data-copy-target="${idSafe}_title" style="min-height: 30px;padding:4px;border-radius:6px">Copy Title</button>
+              <button data-copy-target="${idSafe}_desc" style="min-height: 30px;padding:4px;border-radius:6px">Copy Desc</button>
+              <button data-copy-target="${idSafe}_hook" style="min-height: 30px;padding:4px;border-radius:6px">Copy Hook</button>
+              <button data-copy-target="${idSafe}_narrator" style="min-height: 30px;padding:4px;border-radius:6px">Copy Script</button>
+              <button data-copy-target="${idSafe}_tags" style="min-height: 30px;padding:4px;border-radius:6px">Copy Tags</button>
+              <button data-copy-audio="${idSafe}" style="min-height: 30px;padding:4px;border-radius:6px">Copy Audio</button>
             </div>
           </div>
-          <div style="margin-top:15px;font-size:12px;color:var(--caption-txt-output)">Title</div>
-          <div id="${idSafe}_title" style="margin-top:4px;color:var(--color-title-gen);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${esc(parsed.title)}</div>
-          <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Description / Overview</div>
-          <div id="${idSafe}_desc" style="margin-top:4px;color:var(--color-desc);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${esc(parsed.description)}</div>
-          <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Hook</div>
-          <div id="${idSafe}_hook" style="margin-top:4px;color:var(--color-hooks);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${esc(parsed.hook)}</div>
-          <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Script narator/voice</div>
-          <div id="${idSafe}_narrator" style="margin-top:4px;color:var(--color-narrator);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${esc(parsed.narratorScript)}</div>
-          <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Hashtags</div>
-          <div id="${idSafe}_tags" style="margin-top:4px;color:var(--color-tags);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${Array.isArray(parsed.hashtags)?parsed.hashtags.join(' '):(parsed.hashtags||'')}</div>
-          <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Audio Recommendation</div>
-          <div id="${idSafe}_audio" style="margin-top:4px;color:var(--color-audio);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;white-space:pre-line">${''}</div>
-        `
-        panel.appendChild(card)
-        try{ const audioEl = document.getElementById(idSafe + '_audio'); if(audioEl) audioEl.textContent = formatAudioDisplay(parsed.audio) }catch(e){}
-      })
+        </div>
+        <div style="margin-top:15px;font-size:12px;color:var(--caption-txt-output)">Title</div>
+        <div id="${idSafe}_title" style="margin-top:4px;color:var(--color-title-gen);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${esc(parsed.title)}</div>
+        <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Description / Overview</div>
+        <div id="${idSafe}_desc" style="margin-top:4px;color:var(--color-desc);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${esc(parsed.description)}</div>
+        <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Hook</div>
+        <div id="${idSafe}_hook" style="margin-top:4px;color:var(--color-hooks);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${esc(parsed.hook)}</div>
+        <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Script narator/voice</div>
+        <div id="${idSafe}_narrator" style="margin-top:4px;color:var(--color-narrator);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${esc(parsed.narratorScript)}</div>
+        <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Hashtags</div>
+        <div id="${idSafe}_tags" style="margin-top:4px;color:var(--color-tags);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;">${Array.isArray(parsed.hashtags)?parsed.hashtags.join(' '):(parsed.hashtags||'')}</div>
+        <div style="margin-top:8px;font-size:12px;color:var(--caption-txt-output)">Audio Recommendation</div>
+        <div id="${idSafe}_audio" style="margin-top:4px;color:var(--color-audio);box-shadow: 0px 7px 7px -10px gray;padding-bottom: 4px;white-space:pre-line">${''}</div>
+      `
+      panel.appendChild(card)
+      try{ const audioEl = document.getElementById(idSafe + '_audio'); if(audioEl) audioEl.textContent = formatAudioDisplay(parsed.audio) }catch(e){}
+    })
 
-      // per-card copy wiring
-      function copyTextAndToast(text, btn, prevLabel){
-        if(!text){ showToast('Nothing to copy', 'info'); return }
-        navigator.clipboard.writeText(text).then(()=>{ showToast('Copied to clipboard', 'success'); if(btn){ const prev = prevLabel != null ? prevLabel : btn.textContent; btn.textContent = 'Copied'; setTimeout(()=> btn.textContent = prev, 1200) } }).catch(()=> showToast('Copy failed', 'error'))
-      }
-      panel.querySelectorAll('button[data-copy-target]').forEach(b=>{
-        b.addEventListener('click', ()=>{
-          const tgt = b.getAttribute('data-copy-target')
-          const el = document.getElementById(tgt)
-          const text = el ? el.textContent : ''
-          copyTextAndToast(text, b)
-        })
+    // per-card copy wiring
+    function copyTextAndToast(text, btn, prevLabel){
+      if(!text){ showToast('Nothing to copy', 'info'); return }
+      navigator.clipboard.writeText(text).then(()=>{ showToast('Copied to clipboard', 'success'); if(btn){ const prev = prevLabel != null ? prevLabel : btn.textContent; btn.textContent = 'Copied'; setTimeout(()=> btn.textContent = prev, 1200) } }).catch(()=> showToast('Copy failed', 'error'))
+    }
+    panel.querySelectorAll('button[data-copy-target]').forEach(b=>{
+      b.addEventListener('click', ()=>{
+        const tgt = b.getAttribute('data-copy-target')
+        const el = document.getElementById(tgt)
+        const text = el ? el.textContent : ''
+        copyTextAndToast(text, b)
       })
+    })
     panel.querySelectorAll('button[data-copy-all]').forEach(b=>{
       b.addEventListener('click', ()=>{
         const prefix = b.getAttribute('data-copy-all')
@@ -2960,13 +3194,7 @@ async function generateFromMain(){
     const goals = (presetObj && Array.isArray(presetObj.goal) && presetObj.goal.length) ? presetObj.goal.join(', ') : ''
     pushGenerateHistory({ ts: Date.now(), title, overview, platform: platforms[0], presetKey: presetObj ? (document.getElementById('aiPresetSelect')?.value || '') : '', goals, type: 'generate', results })
   }catch(err){ console.error('AI generation failed', err); showToast(err && err.message ? err.message : 'AI generation failed.', 'error'); panel.innerHTML = '<div style="padding:12px;color:#c66">AI generation failed. See console.</div>' }
-  finally {
-    // 🆕 RESTORE BUTTON STATE
-    if (btn) {
-      btn.disabled = false
-      btn.textContent = btnOriginalLabel
-    }
-  }
+  finally{ setGenerateButtonsBusy(false) }
 }
 
 async function generateVariations(count) {
@@ -2976,10 +3204,17 @@ async function generateVariations(count) {
     showToast('Isi minimal Title atau Overview untuk generate.', 'error')
     return
   }
+  if(_generateBusy){
+    showToast('Generate sedang berjalan, tunggu selesai.', 'info')
+    return
+  }
   const lang = document.getElementById('aiLangSelect')?.value || 'id'
   const prov = document.getElementById('aiProviderSelect')?.value || 'gemini'
   const model = document.getElementById('aiModelSelect')?.value || ''
-  const apiKey = (function(){ try{ const raw = localStorage.getItem('ai-settings'); if(raw){ const s = JSON.parse(raw); const k = s?.keys?.[prov]; if(k) return String(k).trim() } }catch(e){} return String(localStorage.getItem('ai_api_key')||'').trim() })()
+  let apiKey = await getKeyForProvider(prov)
+  if(!apiKey){
+    try{ await loadApiKeyFromBackend(prov) }catch(e){}
+  }
   const platform = document.getElementById('aiPlatformSelect')?.value || 'youtube'
   const { tone } = getEffectiveToneAndKeywords()
   const keywords = getSelectedKeywords()
@@ -2994,18 +3229,31 @@ async function generateVariations(count) {
 
   const panel = document.getElementById('aiResultPanel')
   panel.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><strong>Variations</strong><div id="variationsLoading" style="font-size:12px;color:#888"></div></div>`
+  setGenerateButtonsBusy(true)
 
   const extractJson = (txt) => { const m = String(txt||'').match(/\{[\s\S]*\}/); if(!m) return null; try{ return JSON.parse(m[0]) }catch(e){ return null } }
 
   try{
-    if(!apiKey) throw new Error('AI API key is empty for selected provider (set it in Settings, then Save)')
     const results = []
     const loadingEl = document.getElementById('variationsLoading')
+    const maxWords = toIntInRange(presetObj?.maxWords, 120, 30, 500)
+    const hashtagCount = toIntInRange(presetObj?.hashtagCount, 10, 1, 30)
+    const seenVariationFingerprints = new Set()
 
-    const batchIdVar = Date.now()
     for(let i=0;i<resolvedCount;i++){
       if(loadingEl) loadingEl.textContent = `Variasi ${i+1}/${resolvedCount}...`
       let prompt = buildFullPrompt({ title, overview, platform, lang, preset: presetObj, tone: tone || 'neutral', keywords, presetInstructions })
+      const previousSummary = results
+        .slice(-3)
+        .map((r, idx)=> `- Prev ${idx + 1}: title="${String(r?.parsed?.title || '').slice(0, 80)}"; hook="${String(r?.parsed?.hook || '').slice(0, 80)}"`)
+        .join('\n')
+      const variationDirectives = [
+        `VARIATION MODE: buat variasi ${i + 1} dari ${resolvedCount}.`,
+        '- Wajib beda angle, hook, CTA, dan narasi dibanding variasi lain.',
+        '- Jangan menyalin kalimat pembuka atau susunan kalimat dari variasi sebelumnya.',
+        previousSummary ? `Ringkasan variasi sebelumnya (hindari pola ini):\n${previousSummary}` : ''
+      ].filter(Boolean).join('\n')
+      prompt = `${prompt}\n\n${variationDirectives}`.trim()
       try{
         if(presetObj && (presetObj.audioStyle || presetObj.musicMood || presetObj.audioGenre || presetObj.musicSuggestion || presetObj.audioLength)){
           prompt += '\n\nIMPORTANT: If applicable include an "audio" object in the JSON with keys: "style","mood","genre","suggestion","length". Use concise phrases.'
@@ -3013,12 +3261,66 @@ async function generateVariations(count) {
       }catch(e){}
 
       let raw = null
-      try{ raw = await window.AI.generate({ provider: prov, apiKey, prompt, model }) }catch(e){ raw = String(e?.message||e) }
+      try{ raw = await window.AI.generate({ provider: prov, apiKey: apiKey || "", prompt, model, noCache: true }) }catch(e){ raw = String(e?.message||e) }
 
       let parsed = extractJson(String(raw || ''))
       if(!parsed) parsed = { title: '', description: String(raw||'').slice(0,800), hashtags: [], hook: '', narratorScript: '' }
+      parsed = normalizeGeneratedPayload(parsed, { maxWords, hashtagCount })
+      const likelyProviderError = looksLikeProviderErrorText(raw)
+      const qualityBefore = evaluateGeneratedPayloadQuality(parsed, { maxWords, hashtagCount })
+      if(!likelyProviderError && !looksLikeProviderErrorText(parsed?.description || '') && qualityBefore.score < 68){
+        try{
+          const qualityPrompt = buildQualityReprompt(prompt, qualityBefore)
+          const rawQ = await window.AI.generate({ provider: prov, apiKey: apiKey || "", prompt: qualityPrompt, model, noCache: true })
+          const parsedQ = extractJson(rawQ)
+          if(parsedQ){
+            const normalizedQ = normalizeGeneratedPayload(parsedQ, { maxWords, hashtagCount })
+            const qualityAfter = evaluateGeneratedPayloadQuality(normalizedQ, { maxWords, hashtagCount })
+            if(qualityAfter.score > qualityBefore.score){
+              parsed = normalizedQ
+              aiLog('debug','variations.quality.regen',{ index: i + 1, before: qualityBefore, after: qualityAfter })
+            }
+          }
+        }catch(e){
+          aiLog('warn','variations.quality.regen.error',{ index: i + 1, error: String(e) })
+        }
+      }
+      let variationFingerprint = buildVariationFingerprint(parsed)
+      const hasValidFingerprint = variationFingerprint && variationFingerprint.length > 30
+      if(hasValidFingerprint && seenVariationFingerprints.has(variationFingerprint) && !looksLikeProviderErrorText(parsed?.description || '')){
+        aiLog('warn','variations.duplicate.detected',{ index: i + 1 })
+        try{
+          const dedupePrompt = `${prompt}
+
+DUPLICATE DETECTED:
+- Output kamu terlalu mirip dengan variasi sebelumnya.
+- Regenerate dengan ANGLE baru yang benar-benar berbeda.
+- Ubah hook, CTA, struktur kalimat, dan mayoritas hashtag.
+- Hindari frasa yang sama dari variasi sebelumnya.
+
+Return JSON saja, tanpa markdown.`.trim()
+          const rawDistinct = await window.AI.generate({ provider: prov, apiKey: apiKey || "", prompt: dedupePrompt, model, noCache: true })
+          const parsedDistinct = extractJson(rawDistinct)
+          if(parsedDistinct){
+            const normalizedDistinct = normalizeGeneratedPayload(parsedDistinct, { maxWords, hashtagCount })
+            const distinctFingerprint = buildVariationFingerprint(normalizedDistinct)
+            if(distinctFingerprint && !seenVariationFingerprints.has(distinctFingerprint)){
+              parsed = normalizedDistinct
+              raw = rawDistinct
+              variationFingerprint = distinctFingerprint
+              aiLog('info','variations.duplicate.resolved',{ index: i + 1 })
+            }else{
+              aiLog('warn','variations.duplicate.persist',{ index: i + 1 })
+            }
+          }
+        }catch(e){
+          aiLog('warn','variations.duplicate.retry.error',{ index: i + 1, error: String(e) })
+        }
+      }
+      if(variationFingerprint) seenVariationFingerprints.add(variationFingerprint)
       try{
-        if(!parsed.audio && presetObj && (presetObj.audioStyle || presetObj.musicMood || presetObj.audioGenre || presetObj.musicSuggestion || presetObj.audioLength)){
+        if(presetObj && (presetObj.audioStyle || presetObj.musicMood || presetObj.audioGenre || presetObj.musicSuggestion || presetObj.audioLength)){
+          parsed.audio = parsed.audio || {}
           parsed.audio = {
             style: (parsed.audio && parsed.audio.style) || presetObj.audioStyle || '',
             mood: (parsed.audio && parsed.audio.mood) || presetObj.musicMood || '',
@@ -3028,44 +3330,75 @@ async function generateVariations(count) {
           }
         }
       }catch(e){}
-      if(!parsed.hook) parsed.hook = ''
-      if(!parsed.narratorScript) parsed.narratorScript = ''
       results.push({ i: i+1, parsed, raw })
-
-      const esc = (s)=> String(s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-      const feedbackIdVar = `${batchIdVar}_var_${i}`
-      const card = document.createElement('div')
-      card.style.borderTop = '1px solid rgba(255,255,255,0.04)'
-      card.style.paddingTop = '10px'
-      card.style.marginTop = '10px'
-      card.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap: wrap;gap:12px">
-      <div style="display:flex;gap:20px;">
-            <div style="display:flex;align-items:center;gap:12px">
-              <span style="background:rgba(255,255,255,0.03);padding:4px 8px;border-radius:6px;font-size:12px;text-transform:capitalize">${platform}</span><strong>Var ${i+1}</strong>
-            </div>
-            <div class="feedback-group" style="display:flex;gap:6px">
-              <button data-feedback-id="${feedbackIdVar}" data-feedback-rating="good" style="min-height: 30px;padding:6px 10px;border-radius:6px;font-size:12px">Bagus</button>
-    <button data-feedback-id="${feedbackIdVar}" data-feedback-rating="bad" style="min-height: 30px;padding:6px 10px;border-radius:6px;font-size:12px">Kurang</button></div></div>
-  <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-  <div class="copy-group" style="display:flex;gap:6px;flex-wrap:wrap">
-    <button data-copy-all="var_${i}" style="min-height: 30px;padding:4px;border-radius:6px">Copy all</button>
-    <button data-copy-caption="var_${i}" style="min-height: 30px;padding:4px;border-radius:6px">Copy as caption</button>
-    <button data-copy-target="var_${i}_title" style="min-height: 30px;padding:4px;border-radius:6px">Copy Title</button>
-    <button data-copy-target="var_${i}_desc" style="min-height: 30px;padding:4px;border-radius:6px">Copy Desc</button>
-    <button data-copy-target="var_${i}_hook" style="min-height: 30px;padding:4px;border-radius:6px">Copy Hook</button>
-    <button data-copy-target="var_${i}_narrator" style="min-height: 30px;padding:4px;border-radius:6px">Copy Script</button>
-    <button data-copy-target="var_${i}_tags" style="min-height: 30px;padding:4px;border-radius:6px">Copy Tags</button>
-    <button data-copy-audio="var_${i}" style="min-height: 30px;padding:4px;border-radius:6px">Copy Audio</button>
-  </div>
-</div>
-</div>
-      <div style="margin-top:6px;font-size:12px;color:#b0b0b0">Title</div><div id="var_${i}_title" style="margin-top:4px;color:#d9cd71;background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.title)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Description / Overview</div><div id="var_${i}_desc" style="margin-top:4px;color:var(--color-desc);background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.description)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Hook</div><div id="var_${i}_hook" style="margin-top:4px;color:var(--color-hook);background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.hook)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Script narator/voice</div><div id="var_${i}_narrator" style="margin-top:4px;color:var(--color-narrator);background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.narratorScript)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Hashtags</div><div id="var_${i}_tags" style="margin-top:4px;color:#var(--color-tags);background:#040f1abd;padding:10px;border-radius:8px">${Array.isArray(parsed.hashtags)?parsed.hashtags.join(' '):(parsed.hashtags||'')}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Audio Recommendation</div><div id="var_${i}_audio" style="margin-top:4px;color:var(--color-audio);background:#040f1abd;padding:10px;border-radius:8px;white-space:pre-line"></div>`
-      panel.appendChild(card)
-      try{ const audioEl = document.getElementById('var_' + i + '_audio'); if(audioEl) audioEl.textContent = formatAudioDisplay(parsed.audio) }catch(e){}
     }
 
     if(loadingEl) loadingEl.textContent = ''
+    const esc = (s)=> String(s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    const tabsWrap = document.createElement('div')
+    tabsWrap.style.marginTop = '8px'
+    tabsWrap.innerHTML = `
+      <div id="variationTabsNav" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"></div>
+      <div id="variationTabsPanels" style="margin-top:8px"></div>
+    `
+    panel.appendChild(tabsWrap)
+    const tabsNav = document.getElementById('variationTabsNav')
+    const tabsPanels = document.getElementById('variationTabsPanels')
+    const tabButtons = []
+    const tabPanelEls = []
+    const setTabButtonState = (btn, active) => {
+      btn.style.minHeight = '32px'
+      btn.style.padding = '4px 10px'
+      btn.style.borderRadius = '8px'
+      btn.style.fontSize = '12px'
+      btn.style.border = active ? '1px solid rgba(0,114,255,0.65)' : '1px solid rgba(255,255,255,0.16)'
+      btn.style.background = active ? 'rgba(0,114,255,0.2)' : 'rgba(255,255,255,0.04)'
+      btn.style.color = active ? '#cfe2ff' : '#c7d2e2'
+      btn.style.fontWeight = active ? '700' : '500'
+    }
+    const activateVariationTab = (tabIndex) => {
+      tabButtons.forEach((btn, idx)=> setTabButtonState(btn, idx === tabIndex))
+      tabPanelEls.forEach((tabEl, idx)=>{ tabEl.style.display = idx === tabIndex ? 'block' : 'none' })
+    }
+    results.forEach(({ i, parsed }, idx)=>{
+      const tabBtn = document.createElement('button')
+      tabBtn.type = 'button'
+      tabBtn.textContent = `Var ${i}`
+      setTabButtonState(tabBtn, idx === 0)
+      tabBtn.addEventListener('click', ()=> activateVariationTab(idx))
+      tabsNav.appendChild(tabBtn)
+      tabButtons.push(tabBtn)
+
+      const tabPanel = document.createElement('div')
+      tabPanel.style.display = idx === 0 ? 'block' : 'none'
+      tabPanel.style.borderTop = '1px solid rgba(255,255,255,0.04)'
+      tabPanel.style.paddingTop = '10px'
+      tabPanel.style.marginTop = '10px'
+      tabPanel.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap: wrap;gap:12px">
+        <div style="display:flex;align-items:center;gap:12px">
+          <span style="background:rgba(255,255,255,0.03);padding:4px 8px;border-radius:6px;font-size:12px;text-transform:capitalize">${platform}</span>
+          <strong>Var ${i}</strong>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+          <div class="copy-group" style="display:flex;gap:6px;flex-wrap:wrap">
+            <button data-copy-all="var_${idx}" style="min-height: 30px;padding:4px;border-radius:6px">Copy all</button>
+            <button data-copy-caption="var_${idx}" style="min-height: 30px;padding:4px;border-radius:6px">Copy as caption</button>
+            <button data-copy-target="var_${idx}_title" style="min-height: 30px;padding:4px;border-radius:6px">Copy Title</button>
+            <button data-copy-target="var_${idx}_desc" style="min-height: 30px;padding:4px;border-radius:6px">Copy Desc</button>
+            <button data-copy-target="var_${idx}_hook" style="min-height: 30px;padding:4px;border-radius:6px">Copy Hook</button>
+            <button data-copy-target="var_${idx}_narrator" style="min-height: 30px;padding:4px;border-radius:6px">Copy Script</button>
+            <button data-copy-target="var_${idx}_tags" style="min-height: 30px;padding:4px;border-radius:6px">Copy Tags</button>
+            <button data-copy-audio="var_${idx}" style="min-height: 30px;padding:4px;border-radius:6px">Copy Audio</button>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:6px;font-size:12px;color:#b0b0b0">Title</div><div id="var_${idx}_title" style="margin-top:4px;color:#d9cd71;background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.title)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Description / Overview</div><div id="var_${idx}_desc" style="margin-top:4px;color:var(--color-desc);background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.description)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Hook</div><div id="var_${idx}_hook" style="margin-top:4px;color:var(--color-hook);background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.hook)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Script narator/voice</div><div id="var_${idx}_narrator" style="margin-top:4px;color:var(--color-narrator);background:#040f1abd;padding:10px;border-radius:8px">${esc(parsed.narratorScript)}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Hashtags</div><div id="var_${idx}_tags" style="margin-top:4px;color:var(--color-tags);background:#040f1abd;padding:10px;border-radius:8px">${Array.isArray(parsed.hashtags)?parsed.hashtags.join(' '):(parsed.hashtags||'')}</div><div style="margin-top:6px;font-size:12px;color:#b0b0b0">Audio Recommendation</div><div id="var_${idx}_audio" style="margin-top:4px;color:var(--color-audio);background:#040f1abd;padding:10px;border-radius:8px;white-space:pre-line"></div>`
+      tabsPanels.appendChild(tabPanel)
+      tabPanelEls.push(tabPanel)
+      try{ const audioEl = document.getElementById('var_' + idx + '_audio'); if(audioEl) audioEl.textContent = formatAudioDisplay(parsed.audio) }catch(e){}
+    })
+    if(tabButtons.length > 0) activateVariationTab(0)
 
     function copyTextAndToastVar(text, btn){
       if(!text){ showToast('Nothing to copy', 'info'); return }
@@ -3103,14 +3436,6 @@ async function generateVariations(count) {
         copyTextAndToastVar(text, b)
       })
     })
-    panel.querySelectorAll('button[data-feedback-id]').forEach(b=>{
-      b.addEventListener('click', ()=>{
-        const id = b.getAttribute('data-feedback-id')
-        const rating = b.getAttribute('data-feedback-rating') || 'good'
-        setFeedback(id, rating)
-        showToast(rating === 'good' ? 'Terima kasih!' : 'Feedback tercatat.', 'success')
-      })
-    })
 
     const exp = document.createElement('div')
     exp.style.marginTop = '10px'
@@ -3127,6 +3452,7 @@ async function generateVariations(count) {
     const goalsVar = (presetObj && Array.isArray(presetObj.goal) && presetObj.goal.length) ? presetObj.goal.join(', ') : ''
     pushGenerateHistory({ ts: Date.now(), title, overview, platform, presetKey, goals: goalsVar, type: 'variations', results })
   }catch(err){ console.error('generateVariations failed', err); showToast(err && err.message ? err.message : 'Variations failed.', 'error'); panel.innerHTML = '<div style="padding:12px;color:#c66">Variations failed. See console.</div>' }
+  finally{ setGenerateButtonsBusy(false) }
 }
 
 async function loadMedia(page = 1){
@@ -3603,13 +3929,16 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   try{
     // Get current provider from localStorage or use default
     const settings = localStorage.getItem('ai-settings')
-    let provider = 'single'
+    let provider = 'gemini'
     if(settings){
-      try{ const parsed = JSON.parse(settings); provider = parsed.provider || 'single' }
+      try{ const parsed = JSON.parse(settings); provider = parsed.provider || 'gemini' }
       catch(e){}
     }
+    if(!['gemini','openai','openrouter','groq','together','cohere','huggingface','deepseek'].includes(provider)){
+      provider = 'gemini'
+    }
     
-    // Auto-load key from backend (will cache to localStorage + populate Settings input)
+    // Probe key status from backend (masked response).
     aiLog('info','initializeAIGenerator.start',{ provider })
     await loadApiKeyFromBackend(provider)
     aiLog('info','initializeAIGenerator.complete',{ provider })

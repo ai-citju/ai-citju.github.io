@@ -72,24 +72,11 @@ Sinopsis: ${overview}
     `.trim()
 
     // ===== CALL BACKEND =====
-    // prefer a configured backend URL (localStorage / APP_CONFIG) over any pre-set this.backendURL
-    const base = this.getBackendURLFromConfig() || this.backendURL
-    if(!base) throw new Error('AI backendURL not configured')
-    const res = await fetch(`${base}/ai/summarize`, {
-      method: "POST",
-      headers: { 
-        "Content-Type": "application/json",
-        ...this.getAuthHeaders()
-      },
-      body: JSON.stringify({
-        provider: this.provider,
-        apiKey: this.apiKey,
-        prompt
-      })
+    const data = await this._callBackendSummarize({
+      provider: this.provider,
+      apiKey: this.apiKey,
+      prompt
     })
-
-    const data = await res.json()
-    if (data.error) throw new Error(data.error)
 
     // ===== SAVE CACHE =====
     localStorage.setItem(key, data.result)
@@ -98,91 +85,77 @@ Sinopsis: ${overview}
   }
   ,
 
-  // Direct call to Gemini API from frontend
-  async _callGeminiDirect(apiKey, prompt, model) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-2.5-flash'}:generateContent?key=${encodeURIComponent(apiKey)}`
-    
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }]
-      })
-    })
-    
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}))
-      throw new Error(err.error?.message || `Gemini API error: ${res.status}`)
-    }
-    
-    const data = await res.json()
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
-  },
+  // Backend-only call path keeps behavior consistent across region/browser/network.
+  async _callBackendSummarize({ provider, apiKey, prompt, model, noCache }) {
+    const base = this.getBackendURLFromConfig() || this.backendURL
+    if(!base) throw new Error('AI backendURL not configured')
+    const body = { provider, prompt, model, allowFallback: true }
+    if(apiKey) body.apiKey = apiKey
+    if(noCache) body.noCache = true
 
-  // Direct call to OpenAI API from frontend
-  async _callOpenAIDirect(apiKey, prompt, model) {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: model || 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 4000
-      })
-    })
-    
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}))
-      throw new Error(err.error?.message || `OpenAI error: ${res.status}`)
+    const configuredTimeout = (() => {
+      try{
+        const raw = Number(localStorage.getItem('ai_request_timeout_ms') || '')
+        if(Number.isFinite(raw) && raw >= 30000 && raw <= 180000) return Math.floor(raw)
+      }catch(e){}
+      return 90000
+    })()
+    const attempts = [configuredTimeout, Math.min(180000, configuredTimeout + 30000)]
+    let lastTimeoutSec = Math.round(configuredTimeout / 1000)
+
+    for(let i=0;i<attempts.length;i++){
+      const timeoutMs = attempts[i]
+      const controller = new AbortController()
+      const timer = setTimeout(()=> controller.abort(), timeoutMs)
+      let res
+      try{
+        res = await fetch(`${base}/ai/summarize`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...this.getAuthHeaders()
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal
+        })
+      } catch (e) {
+        if (e && e.name === 'AbortError') {
+          lastTimeoutSec = Math.round(timeoutMs / 1000)
+          if(i < attempts.length - 1){
+            try{ console.warn('[AI] timeout, retrying summarize once', { provider, timeoutMs }) }catch(_){}
+            continue
+          }
+          throw new Error(`AI request timeout (>${lastTimeoutSec}s)`)
+        }
+        throw e
+      } finally {
+        clearTimeout(timer)
+      }
+
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || data?.error) {
+        const msg = data?.error || `${res.status} ${res.statusText || 'Backend error'}`
+        throw new Error(msg)
+      }
+      return data
     }
-    
-    const data = await res.json()
-    return data.choices?.[0]?.message?.content || ''
+    throw new Error(`AI request timeout (>${lastTimeoutSec}s)`)
   },
 
   // Generic prompt runner (used by AI suggestions / social generator)
-  async generate({ provider, apiKey, prompt, model } = {}) {
+  async generate({ provider, apiKey, prompt, model, noCache } = {}) {
     const useProvider = provider || this.provider
-    const useKey = apiKey || this.apiKey
+    const useKey = apiKey || this.apiKey || ""
     if (!useProvider) throw new Error("AI provider not configured")
-    if (!useKey) throw new Error("AI apiKey not configured")
     if (!prompt) throw new Error("Missing prompt")
 
-    // 🆕 TRY DIRECT CALL FIRST FOR GEMINI/OPENAI
-    try {
-      if (useProvider === 'gemini') {
-        return await this._callGeminiDirect(useKey, prompt, model)
-      }
-      if (useProvider === 'openai') {
-        return await this._callOpenAIDirect(useKey, prompt, model)
-      }
-    } catch (directErr) {
-      console.warn(`[AI] Direct ${useProvider} call failed, trying backend...`, directErr)
-      // Fall through to backend
-    }
-
-    // prefer a configured backend URL (localStorage / APP_CONFIG) over any pre-set this.backendURL
-    const base = this.getBackendURLFromConfig() || this.backendURL
-    if(!base) throw new Error('AI backendURL not configured')
-    const res = await fetch(`${base}/ai/summarize`, {
-      method: "POST",
-      headers: { 
-        "Content-Type": "application/json",
-        ...this.getAuthHeaders()
-      },
-      body: JSON.stringify({
-        provider: useProvider,
-        apiKey: useKey,
-        prompt,
-        model
-      })
+    const data = await this._callBackendSummarize({
+      provider: useProvider,
+      apiKey: useKey,
+      prompt,
+      model,
+      noCache: !!noCache
     })
-
-    const data = await res.json()
-    if (data?.error) throw new Error(data.error)
     return data?.result
   }
   }
