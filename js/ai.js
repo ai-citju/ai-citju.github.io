@@ -10,11 +10,13 @@
     provider: _prev.provider || "",
     apiKey: _prev.apiKey || "",
 
-  // Helper: prefer localStorage override, then APP_CONFIG/AI, strip trailing slashes
+  // Helper: prefer runtime API base, then explicit user override, then APP_CONFIG/AI.
   getBackendURLFromConfig() {
     try{
-      const stored = String(localStorage.getItem('backend_url') || '').trim()
-      const raw = stored || (window.APP_CONFIG && window.APP_CONFIG.backendURL) || (window.AI && window.AI.backendURL) || ''
+      const runtime = String((typeof window !== 'undefined' && window.API_BASE_URL) || '').trim()
+      const explicit = String(localStorage.getItem('backend_url_explicit') || '') === '1'
+      const stored = explicit ? String(localStorage.getItem('backend_url') || '').trim() : ''
+      const raw = runtime || stored || (window.APP_CONFIG && window.APP_CONFIG.backendURL) || (window.AI && window.AI.backendURL) || ''
       return String(raw || '').replace(/\/+$/,'')
     }catch(e){ return '' }
   },

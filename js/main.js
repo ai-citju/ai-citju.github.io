@@ -13,8 +13,10 @@ function aiLog(level, tag, data){
 }
 function getBackendURL(){
   try{
-    const stored = String(localStorage.getItem('backend_url') || '').trim()
-    const raw = stored || (window.APP_CONFIG && window.APP_CONFIG.backendURL) || (window.AI && window.AI.backendURL) || ''
+    const runtime = String((typeof window !== 'undefined' && window.API_BASE_URL) || '').trim()
+    const explicit = String(localStorage.getItem('backend_url_explicit') || '') === '1'
+    const stored = explicit ? String(localStorage.getItem('backend_url') || '').trim() : ''
+    const raw = runtime || stored || (window.APP_CONFIG && window.APP_CONFIG.backendURL) || (window.AI && window.AI.backendURL) || ''
     return String(raw || '').replace(/\/+$/,'')
   }catch(e){ return '' }
 }
@@ -909,7 +911,8 @@ function mountAIGeneratorMain(){
 
     // populate backend URL control from localStorage or app config
     try{
-      const storedBackend = localStorage.getItem('backend_url') || ''
+      const explicitBackend = String(localStorage.getItem('backend_url_explicit') || '') === '1'
+      const storedBackend = explicitBackend ? (localStorage.getItem('backend_url') || '') : ''
       const backendInput = document.getElementById('settingsBackendURL')
       if(backendInput){
         backendInput.value = storedBackend || (window.APP_CONFIG && window.APP_CONFIG.backendURL) || (window.AI && window.AI.backendURL) || ''
@@ -1314,6 +1317,8 @@ function mountAIGeneratorMain(){
       if(!url) return showStatus('Backend URL kosong','error')
       try{
         localStorage.setItem('backend_url', url)
+        localStorage.setItem('backend_url_explicit', '1')
+        window.API_BASE_URL = url
         window.APP_CONFIG = window.APP_CONFIG || {}; window.APP_CONFIG.backendURL = url
         window.AI = window.AI || {}; window.AI.backendURL = url
         showStatus('Backend URL disimpan', 'success')
@@ -2726,9 +2731,12 @@ async function loadModelsFor(prov, modelEl){
     if(json?.error){
       const msg = String(json.error || '')
       const missingKey = /missing api key/i.test(msg)
+      const regionBlocked = /location is not supported|country|region|territory|geo/i.test(msg)
       if(missingKey){
         setServerKeyPresence(prov, false)
         aiLog('info','modelList.missingKey',{ provider: prov, error: msg })
+      }else if(regionBlocked){
+        aiLog('info','modelList.regionBlocked',{ provider: prov, error: msg, backendURL })
       }else{
         console.warn('loadModelsFor: backend returned error', json.error)
       }
@@ -2740,6 +2748,8 @@ async function loadModelsFor(prov, modelEl){
       note.disabled = true
       note.textContent = missingKey
         ? '(Key belum tersedia: gunakan model default dulu)'
+        : regionBlocked
+          ? '(Model list dibatasi region: gunakan model default / provider lain)'
         : '(Could not fetch models: ' + msg.slice(0,120) + ')'
       modelEl.insertBefore(note, modelEl.firstChild)
       return

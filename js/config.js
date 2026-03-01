@@ -22,7 +22,15 @@
         ? PRODUCTION_BACKEND
         : "";
 
-  const BACKEND_URL = forcedBackend || (isLocal ? LOCAL_WRANGLER : STAGING_BACKEND);
+  let explicitStoredBackend = "";
+  try{
+    const explicit = String(localStorage.getItem('backend_url_explicit') || '') === '1';
+    if(explicit){
+      explicitStoredBackend = String(localStorage.getItem('backend_url') || '').trim();
+    }
+  }catch(e){}
+
+  const BACKEND_URL = forcedBackend || (isLocal ? LOCAL_WRANGLER : (explicitStoredBackend || STAGING_BACKEND));
   window.API_BASE_URL = BACKEND_URL;
 
   // Backwards-compatible fallbacks: presets & AI pakai backend ini bila user belum set di Settings.
